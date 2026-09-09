@@ -108,6 +108,7 @@ var CFG = {
   gapMin:       0.11,
   inputTimeout: 7.0,    // 입력 없을 때 자동 종료(초)
   touchRadius:  0.085,  // 손가락 인식 반경(m)
+  wandLength:   0.26,   // 컨트롤러에 달린 막대 길이(m). 길면 편하고 짧으면 정확함
   padRadius:    0.46,   // 몸에서 패드까지 거리(m)
   padDrop:      0.42,   // 눈높이 대비 패드 높이 차(m)
   gameOverHold: 4.5     // 결과 화면 유지 시간(초)
@@ -125,7 +126,7 @@ var COLORS = [0xff5d73, 0xffb84d, 0x4ecda4, 0x4da6ff];
 var NOTES  = [523.25, 587.33, 659.25, 783.99];  // C5 D5 E5 G5
 
 var renderer, scene, camera, clock, rig;
-var pads = [], startPad, bot = {}, fingerDots = [], hands = [];
+var pads = [], startPad, bot = {}, fingerDots = [], hands = [], grips = [];
 var hud, sub, audioCtx = null;
 var state = 'WAIT', sequence = [], level = CFG.startLevel;
 var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
@@ -187,6 +188,34 @@ function boot() {
     var h = renderer.xr.getHand(j);
     scene.add(h);
     hands.push(h);
+
+    // 컨트롤러 — 끝에 막대와 구슬을 달아 "찌르는 도구"로 씁니다
+    var c = renderer.xr.getControllerGrip(j);
+    var stick = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.008, 0.011, CFG.wandLength, 12),
+      new THREE.MeshStandardMaterial({ color: 0xd9cfff, roughness: 0.5 })
+    );
+    stick.rotation.x = -Math.PI / 2;
+    stick.position.z = -CFG.wandLength / 2;
+    c.add(stick);
+
+    var tipBall = new THREE.Mesh(
+      new THREE.SphereGeometry(0.019, 20, 16),
+      new THREE.MeshBasicMaterial({ color: 0xfff4d6 })
+    );
+    tipBall.position.z = -CFG.wandLength;
+    c.add(tipBall);
+
+    scene.add(c);
+    grips.push({ obj: c, tip: tipBall, source: null });
+
+    // 진동을 쓰려면 inputSource가 필요합니다
+    var ctrl = renderer.xr.getController(j);
+    (function (idx) {
+      ctrl.addEventListener('connected', function (e) { grips[idx].source = e.data; });
+      ctrl.addEventListener('disconnected', function () { grips[idx].source = null; });
+    })(j);
+    scene.add(ctrl);
   }
 
   clock = new THREE.Clock();
@@ -397,6 +426,8 @@ function chord(freqs) {
    ============================================================ */
 function toWait() {
   state = 'WAIT';
+  calibrated = false;   // 다음 사람 자리에 맞춰 다시 배치
+
   startPad.group.visible = true;
   pads.forEach(function (p) { p.group.visible = false; p.lit = 0; });
   drawPanel(hud, '노란 판을 눌러요', '#ffd166', 84);
@@ -439,6 +470,7 @@ function gameOver() {
   var isBest = score > highScore;
   if (isBest) highScore = score;
   pads.forEach(function (p) { p.lit = 0; });
+  buzz(1.0, 220);
   tone(150, 0.5, 'sawtooth', 0.18);
   setTimeout(function () { tone(110, 0.7, 'sawtooth', 0.15); }, 130);
   drawPanel(hud, score > 0 ? '레벨 ' + score + '!' : '아쉬워요', '#ffd166', 100);
@@ -456,8 +488,11 @@ function indexTip(hand) {
   return null;
 }
 
-function fingertips() {
+// 손끝과 컨트롤러 막대 끝을 모두 "누르는 점"으로 취급합니다
+function touchPoints() {
   var out = [];
+
+  // 1) 손가락 (핸드트래킹이 될 때)
   for (var i = 0; i < 2; i++) {
     var joint = indexTip(hands[i]);
     var dot = fingerDots[i];
@@ -472,7 +507,30 @@ function fingertips() {
     }
     dot.visible = false;
   }
+
+  // 2) 컨트롤러 막대 끝
+  for (var k = 0; k < 2; k++) {
+    var g = grips[k];
+    if (!g) continue;
+    var on = g.obj.visible !== false && g.source !== null;
+    g.obj.visible = on;
+    if (on) {
+      g.tip.getWorldPosition(_v);
+      if (_v.lengthSq() > 0.0001) out.push(_v.clone());
+    }
+  }
+
   return out;
+}
+
+// 컨트롤러 진동 — 눌렀을 때 손맛
+function buzz(strength, ms) {
+  for (var i = 0; i < grips.length; i++) {
+    var s = grips[i].source;
+    if (s && s.gamepad && s.gamepad.hapticActuators && s.gamepad.hapticActuators[0]) {
+      try { s.gamepad.hapticActuators[0].pulse(strength, ms); } catch (e) {}
+    }
+  }
 }
 
 // 손가락이 새로 들어온 순간만 인식 (나갔다 다시 들어와야 재인식)
@@ -490,6 +548,7 @@ function checkTouch(pad, tips) {
 function hitPad(i) {
   pads[i].lit = 1;
   tone(NOTES[i], 0.42);
+  buzz(0.5, 45);
   if (sequence[inputIdx] === i) {
     inputIdx++;
     timer = CFG.inputTimeout;
@@ -513,27 +572,23 @@ function loop(time) {
   var dt = Math.min(clock.getDelta(), 0.05);
   var t = (time || 0) * 0.001;
 
-  // VR 진입 후 첫 프레임에 플레이어 키에 맞춰 패드 높이 보정
+  // 서 있는 자리와 바라보는 방향에 맞춰 패드 배치를 통째로 옮깁니다
   if (renderer.xr.isPresenting && !calibrated) {
     var xrCam = renderer.xr.getCamera(camera);
-    var p = new THREE.Vector3();
-    xrCam.getWorldPosition(p);
-    if (p.y > 0.5) {
-      // 머리 위치로 옮기고
-      rig.position.set(p.x, Math.max(0.55, p.y - CFG.padDrop), p.z);
-      // 바라보는 방향으로 돌립니다
-      var d = new THREE.Vector3();
-      xrCam.getWorldDirection(d);
-      rig.rotation.y = Math.atan2(-d.x, -d.z);
+    xrCam.getWorldPosition(_v);
+    if (_v.y > 0.5) {
+      rig.position.set(_v.x, Math.max(0.55, _v.y - CFG.padDrop), _v.z);
+      xrCam.getWorldDirection(_p);
+      rig.rotation.y = Math.atan2(-_p.x, -_p.z);
       calibrated = true;
     }
   }
 
-  var tips = renderer.xr.isPresenting ? fingertips() : [];
+  var tips = renderer.xr.isPresenting ? touchPoints() : [];
 
   if (state === 'WAIT') {
     startPad.mat.emissiveIntensity = 0.45 + Math.sin(t * 3) * 0.25;
-    if (checkTouch(startPad, tips)) { tone(880, 0.3); startGame(); }
+    if (checkTouch(startPad, tips)) { tone(880, 0.3); buzz(0.6, 80); startGame(); }
 
   } else if (state === 'SHOW') {
     timer -= dt;
