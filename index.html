@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>따라하기 — 손으로 하는 기억력 게임</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #17123a; color: #f2eefc; overflow: hidden;
+    font-family: 'Noto Sans KR', system-ui, sans-serif;
+  }
+  canvas { display: block; }
+
+  /* 진단 패널 — 뭐가 잘못됐는지 화면에 바로 보여줍니다 */
+  #diag {
+    position: fixed; top: 12px; left: 12px; z-index: 20;
+    background: rgba(11, 8, 30, 0.86);
+    border: 1px solid #4b3d8f; border-radius: 10px;
+    padding: 12px 16px; font-size: 13px; line-height: 1.9;
+    max-width: 82vw; white-space: pre-wrap;
+  }
+  #diag b { color: #ffd166; font-weight: 700; }
+  .ok   { color: #4ecda4; }
+  .bad  { color: #ff7b8f; }
+  .warn { color: #ffb84d; }
+
+  #enterVR {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+    z-index: 20; padding: 18px 44px;
+    font-family: inherit; font-size: 19px; font-weight: 700; color: #17123a;
+    background: #ffd166; border: none; border-radius: 999px; cursor: pointer;
+    box-shadow: 0 8px 28px rgba(255, 209, 102, 0.35);
+  }
+  #enterVR:disabled { background: #4b3d8f; color: #b9aee0; cursor: default; box-shadow: none; }
+  #enterVR:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+    z-index: 20; font-size: 12px; color: #8d81bb;
+  }
+</style>
+</head>
+<body>
+
+<div id="diag">진단 정보를 불러오는 중…</div>
+<button id="enterVR" disabled>준비 중…</button>
+<div id="hint">PC에서는 마우스로 패드를 클릭해 테스트할 수 있어요</div>
+
+<script>
+/* ============================================================
+   0. 진단 — 문제가 생기면 화면에 그대로 찍습니다
+   ============================================================ */
+var lines = {};
+function say(key, label, value, cls) {
+  lines[key] = '<b>' + label + '</b> <span class="' + (cls || '') + '">' + value + '</span>';
+  var out = [];
+  for (var k in lines) out.push(lines[k]);
+  document.getElementById('diag').innerHTML = out.join('<br>');
+}
+
+say('proto', '주소', location.protocol,
+    location.protocol === 'https:' || location.hostname === 'localhost' ? 'ok' : 'warn');
+
+if (location.protocol === 'file:') {
+  say('proto2', '참고', 'file:// 에서는 헤드셋 접속이 안 됩니다. PC 확인용으로만 쓰세요.', 'warn');
+}
+
+window.addEventListener('error', function (e) {
+  say('err', '오류', (e.message || e.type) + (e.filename ? ' @ ' + e.filename.split('/').pop() : ''), 'bad');
+});
+
+/* ============================================================
+   1. Three.js 로드 — CDN 세 곳을 차례로 시도
+   ============================================================ */
+var CDNS = [
+  'https://unpkg.com/three@0.128.0/build/three.min.js',
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'
+];
+
+function loadThree(i) {
+  if (i >= CDNS.length) {
+    say('three', 'Three.js', '모든 CDN 실패 — 인터넷 연결이나 네트워크 차단을 확인하세요', 'bad');
+    return;
+  }
+  say('three', 'Three.js', '불러오는 중… (' + (i + 1) + '/' + CDNS.length + ')', 'warn');
+  var s = document.createElement('script');
+  s.src = CDNS[i];
+  s.onload = function () {
+    say('three', 'Three.js', '로드됨 (' + THREE.REVISION + ')', 'ok');
+    boot();
+  };
+  s.onerror = function () { loadThree(i + 1); };
+  document.head.appendChild(s);
+}
+loadThree(0);
+
+/* ============================================================
+   설정값 — 현장에서 여기만 고치면 됩니다
+   ============================================================ */
+var CFG = {
+  startLevel:   3,      // 처음 시퀀스 길이
+  litTime:      0.62,   // 패드가 켜져 있는 시간(초)
+  gapTime:      0.24,   // 패드 사이 간격(초)
+  inputTimeout: 7.0,    // 입력 없을 때 자동 종료(초)
+  touchRadius:  0.085,  // 손가락 인식 반경(m)
+  padRadius:    0.46,   // 몸에서 패드까지 거리(m)
+  padDrop:      0.42,   // 눈높이 대비 패드 높이 차(m)
+  gameOverHold: 4.5     // 결과 화면 유지 시간(초)
+};
+
+var COLORS = [0xff5d73, 0xffb84d, 0x4ecda4, 0x4da6ff];
+var NOTES  = [523.25, 587.33, 659.25, 783.99];  // C5 D5 E5 G5
+
+var renderer, scene, camera, clock, rig;
+var pads = [], startPad, bot = {}, fingerDots = [], hands = [];
+var hud, sub, audioCtx = null;
+var state = 'WAIT', sequence = [], level = CFG.startLevel;
+var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
+var highScore = 0, calibrated = false;
+var _v, _p, ray;
+
+/* ============================================================
+   2. 초기화
+   ============================================================ */
+function boot() {
+  _v = new THREE.Vector3();
+  _p = new THREE.Vector3();
+  ray = new THREE.Raycaster();
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x17123a);
+  scene.fog = new THREE.Fog(0x17123a, 3, 12);
+
+  camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 50);
+  camera.position.set(0, 1.4, 0);
+  camera.lookAt(0, 1.05, -1);
+
+  scene.add(new THREE.HemisphereLight(0xbfa8ff, 0x241a4d, 1.6));
+  var key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(1.5, 3, 1.5);
+  scene.add(key);
+
+  var grid = new THREE.GridHelper(10, 20, 0x5b4b9e, 0x2f2560);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.5;
+  scene.add(grid);
+
+  rig = new THREE.Group();
+  rig.position.set(0, 1.0, 0);
+  scene.add(rig);
+
+  buildPads();
+  buildBot();
+  buildHud();
+
+  for (var i = 0; i < 2; i++) {
+    var dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xfff4d6 })
+    );
+    dot.visible = false;
+    scene.add(dot);
+    fingerDots.push(dot);
+  }
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType('local-floor');
+  document.body.appendChild(renderer.domElement);
+
+  for (var j = 0; j < 2; j++) {
+    var h = renderer.xr.getHand(j);
+    scene.add(h);
+    hands.push(h);
+  }
+
+  clock = new THREE.Clock();
+  renderer.setAnimationLoop(loop);
+  toWait();
+
+  addEventListener('resize', function () {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+  renderer.domElement.addEventListener('pointerdown', onPointer);
+
+  setupVRButton();
+}
+
+/* ============================================================
+   3. VR 진입 버튼 — 직접 만들어서 상태를 그대로 보여줍니다
+   ============================================================ */
+function setupVRButton() {
+  var btn = document.getElementById('enterVR');
+
+  if (!navigator.xr) {
+    say('xr', 'WebXR', '이 브라우저는 WebXR을 지원하지 않습니다 (PC 테스트만 가능)', 'warn');
+    btn.textContent = 'VR 사용 불가';
+    return;
+  }
+
+  navigator.xr.isSessionSupported('immersive-vr').then(function (ok) {
+    if (!ok) {
+      say('xr', 'WebXR', 'immersive-vr 세션을 쓸 수 없습니다', 'warn');
+      btn.textContent = 'VR 사용 불가';
+      return;
+    }
+    say('xr', 'WebXR', '사용 가능', 'ok');
+    btn.disabled = false;
+    btn.textContent = 'VR로 시작하기';
+    btn.onclick = function () {
+      navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+      }).then(function (session) {
+        renderer.xr.setSession(session);
+        calibrated = false;
+        initAudio();
+        toWait();
+        document.getElementById('diag').style.display = 'none';
+        btn.style.display = 'none';
+        document.getElementById('hint').style.display = 'none';
+        session.addEventListener('end', function () {
+          document.getElementById('diag').style.display = '';
+          btn.style.display = '';
+          document.getElementById('hint').style.display = '';
+        });
+      }).catch(function (err) {
+        say('xr', 'WebXR', '세션 시작 실패: ' + err.message, 'bad');
+      });
+    };
+  }).catch(function (err) {
+    say('xr', 'WebXR', '확인 실패: ' + err.message, 'bad');
+  });
+}
+
+/* ============================================================
+   4. 패드 · 캐릭터 · 안내판
+   ============================================================ */
+function buildPads() {
+  var spread = 0.62;
+  for (var i = 0; i < 4; i++) {
+    var t = (i - 1.5) / 1.5;
+    var ang = t * spread;
+
+    var g = new THREE.Group();
+    g.position.set(Math.sin(ang) * CFG.padRadius, -t * t * 0.05, -Math.cos(ang) * CFG.padRadius);
+    g.rotation.y = -ang;
+    g.rotation.x = -0.35;
+
+    var mat = new THREE.MeshStandardMaterial({
+      color: COLORS[i], emissive: COLORS[i], emissiveIntensity: 0.18,
+      roughness: 0.45, metalness: 0.05
+    });
+    var face = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.105, 0.035, 32), mat);
+    face.rotation.x = Math.PI / 2;
+    g.add(face);
+
+    var ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.118, 0.008, 12, 40),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 })
+    );
+    g.add(ring);
+
+    rig.add(g);
+    pads.push({ group: g, mat: mat, ring: ring, touching: false, lit: 0 });
+  }
+
+  var sMat = new THREE.MeshStandardMaterial({
+    color: 0xffd166, emissive: 0xffd166, emissiveIntensity: 0.6, roughness: 0.4
+  });
+  var sGroup = new THREE.Group();
+  sGroup.position.set(0, 0.02, -CFG.padRadius);
+  sGroup.rotation.x = -0.35;
+  var sMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.135, 0.135, 0.04, 40), sMat);
+  sMesh.rotation.x = Math.PI / 2;
+  sGroup.add(sMesh);
+  rig.add(sGroup);
+  startPad = { group: sGroup, mat: sMat, touching: false };
+}
+
+function buildBot() {
+  var g = new THREE.Group();
+  g.position.set(0, 0.42, -CFG.padRadius - 0.16);
+
+  var body = new THREE.Mesh(
+    new THREE.SphereGeometry(0.13, 32, 24),
+    new THREE.MeshStandardMaterial({ color: 0x8b7df0, roughness: 0.5 })
+  );
+  body.scale.set(1, 0.92, 0.9);
+  g.add(body);
+
+  var eyeMat = new THREE.MeshBasicMaterial({ color: 0x1a1436 });
+  var eyeX = [-0.048, 0.048];
+  for (var i = 0; i < 2; i++) {
+    var eye = new THREE.Mesh(new THREE.SphereGeometry(0.022, 16, 12), eyeMat);
+    eye.position.set(eyeX[i], 0.02, 0.118);
+    g.add(eye);
+    bot[i === 0 ? 'eyeL' : 'eyeR'] = eye;
+  }
+
+  var earMat = new THREE.MeshStandardMaterial({ color: 0xffd166, roughness: 0.6 });
+  var earX = [-0.075, 0.075];
+  for (var k = 0; k < 2; k++) {
+    var ear = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.026, 0.11, 12), earMat);
+    ear.position.set(earX[k], 0.13, 0);
+    ear.rotation.z = earX[k] < 0 ? 0.32 : -0.32;
+    g.add(ear);
+  }
+
+  rig.add(g);
+  bot.group = g;
+  bot.baseY = g.position.y;
+}
+
+function makePanel(w, h, px) {
+  var c = document.createElement('canvas');
+  c.width = px;
+  c.height = Math.round(px * h / w);
+  var tex = new THREE.CanvasTexture(c);
+  var mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true })
+  );
+  return { canvas: c, ctx: c.getContext('2d'), tex: tex, mesh: mesh };
+}
+
+function buildHud() {
+  hud = makePanel(0.62, 0.20, 768);
+  hud.mesh.position.set(0, 0.44, -CFG.padRadius - 0.02);
+  hud.mesh.rotation.x = 0.12;
+  rig.add(hud.mesh);
+
+  sub = makePanel(0.52, 0.10, 640);
+  sub.mesh.position.set(0, 0.30, -CFG.padRadius - 0.02);
+  sub.mesh.rotation.x = 0.12;
+  rig.add(sub.mesh);
+}
+
+function drawPanel(p, text, color, size) {
+  var ctx = p.ctx, c = p.canvas;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.fillStyle = color || '#f2eefc';
+  ctx.font = '700 ' + (size || 96) + "px 'Noto Sans KR', system-ui, sans-serif";
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, c.width / 2, c.height / 2);
+  p.tex.needsUpdate = true;
+}
+
+/* ============================================================
+   5. 소리
+   ============================================================ */
+function initAudio() {
+  if (audioCtx) { audioCtx.resume(); return; }
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+}
+
+function tone(freq, dur, type, gain) {
+  if (!audioCtx) return;
+  dur = dur || 0.35;
+  var t = audioCtx.currentTime;
+  var osc = audioCtx.createOscillator();
+  var amp = audioCtx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.value = freq;
+  amp.gain.setValueAtTime(0, t);
+  amp.gain.linearRampToValueAtTime(gain || 0.22, t + 0.02);
+  amp.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(amp);
+  amp.connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + dur + 0.05);
+}
+
+function chord(freqs) {
+  freqs.forEach(function (f, i) { setTimeout(function () { tone(f, 0.45); }, i * 70); });
+}
+
+/* ============================================================
+   6. 게임 상태
+   ============================================================ */
+function toWait() {
+  state = 'WAIT';
+  startPad.group.visible = true;
+  pads.forEach(function (p) { p.group.visible = false; p.lit = 0; });
+  drawPanel(hud, '노란 판을 눌러요', '#ffd166', 84);
+  drawPanel(sub, highScore ? '최고 ' + highScore + '단계' : '순서를 기억하는 게임', '#b9aee0', 52);
+}
+
+function startGame() {
+  level = CFG.startLevel;
+  sequence = [];
+  startPad.group.visible = false;
+  pads.forEach(function (p) { p.group.visible = true; });
+  nextRound();
+}
+
+function nextRound() {
+  while (sequence.length < level) {
+    var n = Math.floor(Math.random() * 4);
+    if (sequence.length && n === sequence[sequence.length - 1]) {
+      n = (n + 1 + Math.floor(Math.random() * 3)) % 4;
+    }
+    sequence.push(n);
+  }
+  state = 'SHOW';
+  playIdx = 0; timer = 0.7; litPad = -1;
+  drawPanel(hud, '잘 보세요', '#f2eefc', 84);
+  drawPanel(sub, level + '단계', '#b9aee0', 52);
+}
+
+function toInput() {
+  state = 'INPUT';
+  inputIdx = 0; timer = CFG.inputTimeout;
+  drawPanel(hud, '따라 해요', '#4ecda4', 84);
+  drawPanel(sub, level + '단계 · 0 / ' + level, '#b9aee0', 52);
+}
+
+function gameOver() {
+  state = 'OVER';
+  timer = CFG.gameOverHold;
+  var score = level - 1;
+  var isBest = score > highScore;
+  if (isBest) highScore = score;
+  pads.forEach(function (p) { p.lit = 0; });
+  tone(150, 0.5, 'sawtooth', 0.18);
+  setTimeout(function () { tone(110, 0.7, 'sawtooth', 0.15); }, 130);
+  drawPanel(hud, score > 0 ? score + '단계!' : '아쉬워요', '#ffd166', 100);
+  drawPanel(sub, isBest && score > 0 ? '최고 기록이에요' : '다시 해볼까요', '#b9aee0', 52);
+}
+
+/* ============================================================
+   7. 손가락 입력
+   ============================================================ */
+// three 버전에 따라 joints가 객체이거나 배열입니다. 둘 다 처리합니다.
+function indexTip(hand) {
+  if (!hand || !hand.joints) return null;
+  if (hand.joints['index-finger-tip']) return hand.joints['index-finger-tip'];
+  if (hand.joints.length && hand.joints[9]) return hand.joints[9];
+  return null;
+}
+
+function fingertips() {
+  var out = [];
+  for (var i = 0; i < 2; i++) {
+    var joint = indexTip(hands[i]);
+    var dot = fingerDots[i];
+    if (joint && joint.visible !== false && hands[i].visible !== false) {
+      joint.getWorldPosition(_v);
+      if (_v.lengthSq() > 0.0001) {
+        out.push(_v.clone());
+        dot.position.copy(_v);
+        dot.visible = true;
+        continue;
+      }
+    }
+    dot.visible = false;
+  }
+  return out;
+}
+
+// 손가락이 새로 들어온 순간만 인식 (나갔다 다시 들어와야 재인식)
+function checkTouch(pad, tips) {
+  pad.group.getWorldPosition(_p);
+  var near = false;
+  for (var i = 0; i < tips.length; i++) {
+    if (tips[i].distanceTo(_p) < CFG.touchRadius + 0.03) { near = true; break; }
+  }
+  if (near && !pad.touching) { pad.touching = true; return true; }
+  if (!near) pad.touching = false;
+  return false;
+}
+
+function hitPad(i) {
+  pads[i].lit = 1;
+  tone(NOTES[i], 0.42);
+  if (sequence[inputIdx] === i) {
+    inputIdx++;
+    timer = CFG.inputTimeout;
+    drawPanel(sub, level + '단계 · ' + inputIdx + ' / ' + level, '#b9aee0', 52);
+    if (inputIdx >= level) {
+      state = 'GOOD';
+      timer = 1.2;
+      chord([659.25, 783.99, 1046.5]);
+      drawPanel(hud, '맞았어요', '#4ecda4', 84);
+      drawPanel(sub, '다음 단계', '#b9aee0', 52);
+    }
+  } else {
+    gameOver();
+  }
+}
+
+/* ============================================================
+   8. 루프
+   ============================================================ */
+function loop(time) {
+  var dt = Math.min(clock.getDelta(), 0.05);
+  var t = (time || 0) * 0.001;
+
+  // VR 진입 후 첫 프레임에 플레이어 키에 맞춰 패드 높이 보정
+  if (renderer.xr.isPresenting && !calibrated) {
+    var camY = renderer.xr.getCamera(camera).position.y;
+    if (camY > 0.5) {
+      rig.position.y = Math.max(0.55, camY - CFG.padDrop);
+      calibrated = true;
+      say('cal', '보정', '눈높이 ' + camY.toFixed(2) + 'm', 'ok');
+    }
+  }
+
+  var tips = renderer.xr.isPresenting ? fingertips() : [];
+
+  if (state === 'WAIT') {
+    startPad.mat.emissiveIntensity = 0.45 + Math.sin(t * 3) * 0.25;
+    if (checkTouch(startPad, tips)) { tone(880, 0.3); startGame(); }
+
+  } else if (state === 'SHOW') {
+    timer -= dt;
+    if (timer <= 0) {
+      if (litPad >= 0) {
+        litPad = -1;
+        timer = CFG.gapTime;
+        if (playIdx >= level) toInput();
+      } else {
+        litPad = sequence[playIdx];
+        pads[litPad].lit = 1;
+        tone(NOTES[litPad], CFG.litTime * 0.9);
+        bot.group.position.y = bot.baseY - 0.03;
+        playIdx++;
+        timer = CFG.litTime;
+      }
+    }
+
+  } else if (state === 'INPUT') {
+    timer -= dt;
+    if (timer <= 0) {
+      gameOver();
+    } else {
+      for (var i = 0; i < 4; i++) {
+        if (checkTouch(pads[i], tips)) { hitPad(i); break; }
+      }
+    }
+
+  } else if (state === 'GOOD') {
+    timer -= dt;
+    if (timer <= 0) { level++; nextRound(); }
+
+  } else if (state === 'OVER') {
+    timer -= dt;
+    if (timer <= 0) toWait();
+  }
+
+  for (var k = 0; k < 4; k++) {
+    var p = pads[k];
+    p.lit = Math.max(0, p.lit - dt * 3.2);
+    p.mat.emissiveIntensity = 0.18 + p.lit * 1.5;
+    p.group.scale.setScalar(1 + p.lit * 0.09);
+    p.ring.material.opacity = 0.25 + p.lit * 0.6;
+  }
+
+  bot.group.position.y += (bot.baseY - bot.group.position.y) * Math.min(1, dt * 8);
+  bot.group.rotation.z = Math.sin(t * 1.4) * 0.06;
+  var blink = Math.sin(t * 0.8) > 0.985 ? 0.15 : 1;
+  bot.eyeL.scale.y = blink;
+  bot.eyeR.scale.y = blink;
+
+  renderer.render(scene, camera);
+}
+
+/* ============================================================
+   9. PC 테스트 — 마우스로 패드 클릭
+   ============================================================ */
+function onPointer(e) {
+  if (renderer.xr.isPresenting) return;
+  initAudio();
+  var m = new THREE.Vector2(
+    (e.clientX / innerWidth) * 2 - 1,
+    -(e.clientY / innerHeight) * 2 + 1
+  );
+  ray.setFromCamera(m, camera);
+  if (state === 'WAIT') {
+    if (ray.intersectObject(startPad.group, true).length) { tone(880, 0.3); startGame(); }
+    return;
+  }
+  if (state !== 'INPUT') return;
+  for (var i = 0; i < 4; i++) {
+    if (ray.intersectObject(pads[i].group, true).length) { hitPad(i); return; }
+  }
+}
+</script>
+</body>
+</html>
