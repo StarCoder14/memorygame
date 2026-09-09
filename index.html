@@ -100,15 +100,26 @@ loadThree(0);
    설정값 — 현장에서 여기만 고치면 됩니다
    ============================================================ */
 var CFG = {
-  startLevel:   3,      // 처음 시퀀스 길이
-  litTime:      0.62,   // 패드가 켜져 있는 시간(초)
-  gapTime:      0.24,   // 패드 사이 간격(초)
+  startLevel:   1,      // 시작 레벨 (레벨 번호 = 시퀀스 길이)
+  litTime:      0.70,   // 1레벨에서 패드가 켜져 있는 시간(초)
+  gapTime:      0.28,   // 1레벨에서 패드 사이 간격(초)
+  speedUp:      0.93,   // 레벨당 속도 배율. 작을수록 빨리 어려워짐
+  litMin:       0.28,   // 아무리 빨라져도 이보다 짧아지지 않음
+  gapMin:       0.11,
   inputTimeout: 7.0,    // 입력 없을 때 자동 종료(초)
   touchRadius:  0.085,  // 손가락 인식 반경(m)
   padRadius:    0.46,   // 몸에서 패드까지 거리(m)
   padDrop:      0.42,   // 눈높이 대비 패드 높이 차(m)
   gameOverHold: 4.5     // 결과 화면 유지 시간(초)
 };
+
+// 레벨이 오를수록 시퀀스 재생이 빨라집니다
+function litTime() {
+  return Math.max(CFG.litMin, CFG.litTime * Math.pow(CFG.speedUp, level - 1));
+}
+function gapTime() {
+  return Math.max(CFG.gapMin, CFG.gapTime * Math.pow(CFG.speedUp, level - 1));
+}
 
 var COLORS = [0xff5d73, 0xffb84d, 0x4ecda4, 0x4da6ff];
 var NOTES  = [523.25, 587.33, 659.25, 783.99];  // C5 D5 E5 G5
@@ -134,8 +145,8 @@ function boot() {
   scene.fog = new THREE.Fog(0x17123a, 3, 12);
 
   camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 50);
-  camera.position.set(0, 1.4, 0);
-  camera.lookAt(0, 1.05, -1);
+  camera.position.set(0, 1.45, 0.85);   // PC 테스트용 시점. VR에서는 무시됩니다
+  camera.lookAt(0, 1.0, -0.5);
 
   scene.add(new THREE.HemisphereLight(0xbfa8ff, 0x241a4d, 1.6));
   var key = new THREE.DirectionalLight(0xffffff, 1.1);
@@ -389,7 +400,7 @@ function toWait() {
   startPad.group.visible = true;
   pads.forEach(function (p) { p.group.visible = false; p.lit = 0; });
   drawPanel(hud, '노란 판을 눌러요', '#ffd166', 84);
-  drawPanel(sub, highScore ? '최고 ' + highScore + '단계' : '순서를 기억하는 게임', '#b9aee0', 52);
+  drawPanel(sub, highScore ? '최고 레벨 ' + highScore : '순서를 기억하는 게임', '#b9aee0', 52);
 }
 
 function startGame() {
@@ -411,14 +422,14 @@ function nextRound() {
   state = 'SHOW';
   playIdx = 0; timer = 0.7; litPad = -1;
   drawPanel(hud, '잘 보세요', '#f2eefc', 84);
-  drawPanel(sub, level + '단계', '#b9aee0', 52);
+  drawPanel(sub, '레벨 ' + level, '#b9aee0', 52);
 }
 
 function toInput() {
   state = 'INPUT';
   inputIdx = 0; timer = CFG.inputTimeout;
   drawPanel(hud, '따라 해요', '#4ecda4', 84);
-  drawPanel(sub, level + '단계 · 0 / ' + level, '#b9aee0', 52);
+  drawPanel(sub, '레벨 ' + level + '  0 / ' + level, '#b9aee0', 52);
 }
 
 function gameOver() {
@@ -430,7 +441,7 @@ function gameOver() {
   pads.forEach(function (p) { p.lit = 0; });
   tone(150, 0.5, 'sawtooth', 0.18);
   setTimeout(function () { tone(110, 0.7, 'sawtooth', 0.15); }, 130);
-  drawPanel(hud, score > 0 ? score + '단계!' : '아쉬워요', '#ffd166', 100);
+  drawPanel(hud, score > 0 ? '레벨 ' + score + '!' : '아쉬워요', '#ffd166', 100);
   drawPanel(sub, isBest && score > 0 ? '최고 기록이에요' : '다시 해볼까요', '#b9aee0', 52);
 }
 
@@ -482,13 +493,13 @@ function hitPad(i) {
   if (sequence[inputIdx] === i) {
     inputIdx++;
     timer = CFG.inputTimeout;
-    drawPanel(sub, level + '단계 · ' + inputIdx + ' / ' + level, '#b9aee0', 52);
+    drawPanel(sub, '레벨 ' + level + '  ' + inputIdx + ' / ' + level, '#b9aee0', 52);
     if (inputIdx >= level) {
       state = 'GOOD';
       timer = 1.2;
       chord([659.25, 783.99, 1046.5]);
       drawPanel(hud, '맞았어요', '#4ecda4', 84);
-      drawPanel(sub, '다음 단계', '#b9aee0', 52);
+      drawPanel(sub, '다음 레벨', '#b9aee0', 52);
     }
   } else {
     gameOver();
@@ -504,11 +515,17 @@ function loop(time) {
 
   // VR 진입 후 첫 프레임에 플레이어 키에 맞춰 패드 높이 보정
   if (renderer.xr.isPresenting && !calibrated) {
-    var camY = renderer.xr.getCamera(camera).position.y;
-    if (camY > 0.5) {
-      rig.position.y = Math.max(0.55, camY - CFG.padDrop);
+    var xrCam = renderer.xr.getCamera(camera);
+    var p = new THREE.Vector3();
+    xrCam.getWorldPosition(p);
+    if (p.y > 0.5) {
+      // 머리 위치로 옮기고
+      rig.position.set(p.x, Math.max(0.55, p.y - CFG.padDrop), p.z);
+      // 바라보는 방향으로 돌립니다
+      var d = new THREE.Vector3();
+      xrCam.getWorldDirection(d);
+      rig.rotation.y = Math.atan2(-d.x, -d.z);
       calibrated = true;
-      say('cal', '보정', '눈높이 ' + camY.toFixed(2) + 'm', 'ok');
     }
   }
 
@@ -523,15 +540,16 @@ function loop(time) {
     if (timer <= 0) {
       if (litPad >= 0) {
         litPad = -1;
-        timer = CFG.gapTime;
+        timer = gapTime();
         if (playIdx >= level) toInput();
       } else {
+        var lt = litTime();
         litPad = sequence[playIdx];
         pads[litPad].lit = 1;
-        tone(NOTES[litPad], CFG.litTime * 0.9);
+        tone(NOTES[litPad], lt * 0.9);
         bot.group.position.y = bot.baseY - 0.03;
         playIdx++;
-        timer = CFG.litTime;
+        timer = lt;
       }
     }
 
