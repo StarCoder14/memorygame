@@ -163,7 +163,8 @@ var state = 'SELECT', sequence = [], level = 1;
 var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
 var best = { easy: 0, normal: 0, hard: 0 }, calibrated = false, settle = 0, dbgTick = 0;
 var padCount = 4, D = DIFFS[1], animal = null, animalMesh = null;
-var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null, calYaw = 0;
+var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null;
+var calYaw = 0, calEye = 0, calFallback = false, calWait = 0;
 var spinAmt = 0, darkAmt = 0, blockT = -1;
 var _v, _p, _q, ray;
 
@@ -265,6 +266,8 @@ function setupVRButton() {
         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
       }).then(function (session) {
         renderer.xr.setSession(session);
+        rig.visible = false;      // 보정 전까지 숨깁니다. 엉뚱한 자리에 떴다 튀는 걸 막습니다
+        calWait = 0;
         initAudio(); toSelect();
         document.getElementById('diag').style.display = 'none';
         btn.style.display = 'none';
@@ -882,7 +885,7 @@ function chord(freqs) {
    ============================================================ */
 function toSelect() {
   state = 'SELECT';
-  calibrated = false; settle = CFG.settleTime;
+  calibrated = false; settle = CFG.settleTime; calWait = 0;
   showPads(0); showDiff(true);
   descGroup.visible = false;
   clearInterference(); resetRing();
@@ -1002,6 +1005,19 @@ function applyInterference(dt) {
   }
 }
 
+// 스테이지를 플레이어 기준으로 세웁니다
+function placeStage(x, eyeY, z, yaw) {
+  var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, eyeY / CFG.refEyeHeight));
+  rig.scale.setScalar(sc);
+  rig.position.set(x, eyeY - CFG.padDrop * sc + CFG.stageLift, z);
+  rig.rotation.y = yaw + CFG.yawOffset;
+  fitPoles();
+  calibrated = true;
+  calEye = eyeY;
+  calYaw = rig.rotation.y * 180 / Math.PI;
+  rig.visible = true;
+}
+
 function resetLights() {
   darkAmt = 0;
   envLights.hemi.intensity = envLights.baseHemi;
@@ -1113,31 +1129,32 @@ function loop(time, frame) {
   var dt = Math.min(clock.getDelta(), 0.05);
   var t = (time || 0) * 0.001;
 
-  if (renderer.xr.isPresenting && !calibrated && frame) {
+  if (renderer.xr.isPresenting && !calibrated) {
     settle -= dt;
+    calWait += dt;
     if (settle <= 0) {
       var refSpace = renderer.xr.getReferenceSpace();
-      var pose = refSpace ? frame.getViewerPose(refSpace) : null;
+      var pose = (refSpace && frame) ? frame.getViewerPose(refSpace) : null;
       if (pose) {
         var pp = pose.transform.position, po = pose.transform.orientation;
         _q.set(po.x, po.y, po.z, po.w);
         _p.set(0, 0, -1).applyQuaternion(_q);
         var hx = _p.x, hz = _p.z;
-        if (pp.y > 0.6 && Math.sqrt(hx*hx + hz*hz) > 0.12) {
-          var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, pp.y / CFG.refEyeHeight));
-          rig.scale.setScalar(sc);
-          rig.position.set(pp.x, pp.y - CFG.padDrop * sc, pp.z);
-          // rig의 로컬 -z가 시선 방향과 같아지도록. 부호를 빼면 정확히 등 뒤로 갑니다
-          rig.rotation.y = Math.atan2(-hx, -hz) + CFG.yawOffset;
-          fitPoles();
-          calibrated = true;
-          calYaw = rig.rotation.y * 180 / Math.PI;
-          say('cal', '보정', '눈높이 ' + pp.y.toFixed(2) + 'm · 배율 ' + sc.toFixed(2) +
-              ' · 방향 ' + calYaw.toFixed(0) + '도', 'ok');
+        if (pp.y > 0.6 && Math.sqrt(hx * hx + hz * hz) > 0.12) {
+          placeStage(pp.x, pp.y, pp.z, Math.atan2(-hx, -hz));
+          calFallback = false;
         }
+      }
+      // 3초 안에 머리 위치를 못 읽으면 기본값으로라도 세웁니다.
+      // 이게 없으면 스테이지가 초기 위치(바닥 근처)에 그대로 남습니다.
+      if (!calibrated && calWait > 3.0) {
+        placeStage(0, CFG.refEyeHeight, 0, 0);
+        calFallback = true;
       }
     }
   }
+
+  if (!renderer.xr.isPresenting) rig.visible = true;
 
   var tips = renderer.xr.isPresenting ? touchPoints() : [];
 
@@ -1151,8 +1168,18 @@ function loop(time, frame) {
     dbgTick += dt;
     if (dbgTick > 0.25) {
       dbgTick = 0;
-      drawPanel(dbg, '점 ' + tips.length + ' · 방향 ' + calYaw.toFixed(0) + '도 · ' +
-        D.name + ' 버튼 ' + padCount + '개', tips.length > 0 ? '#4ecda4' : '#ff7b8f', 40);
+      // 바닥(월드 y=0) 기준 실제 높이를 그대로 보여줍니다
+      var eyeH = 0, btnH = 0, chrH = 0;
+      if (frame) {
+        var rs = renderer.xr.getReferenceSpace();
+        var vp = rs ? frame.getViewerPose(rs) : null;
+        if (vp) eyeH = vp.transform.position.y;
+      }
+      pads[0].group.getWorldPosition(_v); btnH = _v.y;
+      descGroup.getWorldPosition(_v);     chrH = _v.y;
+      drawPanel(dbg, '눈 ' + eyeH.toFixed(2) + ' · 버튼 ' + btnH.toFixed(2) +
+        ' · 캐릭터 ' + chrH.toFixed(2) + ' · 방향 ' + calYaw.toFixed(0) + '도',
+        (calFallback ? '#ffb84d' : (btnH > 0.4 ? '#4ecda4' : '#ff7b8f')), 38);
     }
   }
 
