@@ -87,8 +87,9 @@ var CFG = {
   spawnTime:    0.75,
   spawnDrop:    0.85,
 
-  descStart:    2.35,   // 캐릭터가 내려오기 시작하는 높이 (눈높이 기준 위쪽, m)
-  descEnd:      0.52,   // 여기까지 내려오면 끝
+  descStart:    1.52,   // 캐릭터가 내려오기 시작하는 높이 (눈높이보다 약 1.1m 위)
+  descEnd:      0.52,   // 여기까지 내려오면 끝 (눈높이 살짝 위)
+  ropeTop:      2.55,   // 줄이 매달린 천장 지점
   speedGrow:    0.055,  // 레벨당 하강 속도 증가율
 
   touchRadius:  0.085,
@@ -102,17 +103,17 @@ var CFG = {
   debug:        true
 };
 
-// 난이도 3종 — 아래 숫자는 4000회 플레이 시뮬레이션으로 맞춘 값입니다.
-// 어느 난이도든 대략 45~90초에 끝나도록 조정돼 있습니다 (부스 회전율 기준).
+// 난이도 3종 — 4000회 플레이 시뮬레이션으로 맞춘 값입니다.
+// 어느 난이도든 대략 45~85초에 끝나도록 조정돼 있습니다 (부스 회전율 기준).
 var DIFFS = [
   { key:'easy',   name:'쉬움',   color:0x3ecf8e,
-    startPads:4, speed:0.055, step:0.12, wrongDrop:0.16, wrongMul:1.08,
+    startPads:4, speed:0.030, step:0.070, wrongDrop:0.085, wrongMul:1.08,
     expandEvery:8, lit:0.80, gap:0.32, inputTimeout:9.0, interfere:false },
   { key:'normal', name:'보통',   color:0xffc93c,
-    startPads:6, speed:0.055, step:0.13, wrongDrop:0.26, wrongMul:1.16,
+    startPads:6, speed:0.025, step:0.060, wrongDrop:0.135, wrongMul:1.16,
     expandEvery:6, lit:0.62, gap:0.24, inputTimeout:8.0, interfere:false },
   { key:'hard',   name:'어려움', color:0xff5d5d,
-    startPads:8, speed:0.050, step:0.12, wrongDrop:0.34, wrongMul:1.22,
+    startPads:8, speed:0.022, step:0.050, wrongDrop:0.180, wrongMul:1.22,
     expandEvery:5, lit:0.48, gap:0.17, inputTimeout:7.0, interfere:true }
 ];
 
@@ -142,7 +143,7 @@ var ANIMALS = [
 
 var renderer, scene, camera, clock, rig, padRing;
 var pads = [], diffPads = [], bot = null, fingerDots = [], hands = [], grips = [];
-var hud, sub, dbg, audioCtx = null, metalMat, darkMat;
+var dbg, audioCtx = null, metalMat, darkMat;
 var envLights = {}, balloon = null;
 var state = 'SELECT', sequence = [], level = 1;
 var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
@@ -188,6 +189,7 @@ function boot() {
   buildPads();
   buildDiffButtons();
   buildDescender();
+  buildScreen();
   buildHud();
   buildBalloon();
   fitPoles();
@@ -666,6 +668,13 @@ function fitPoles() {
     p.pole.position.set(0, p.slot.y - len / 2, ARM);
     p.base.position.set(0, p.slot.y - len + 0.012, ARM);
   }
+  // 스크린 받침
+  var sl = Math.max(0.3, 0.20 - floorLocal);
+  for (var g = 0; g < SCR.legs.length; g++) {
+    SCR.legs[g].scale.y = sl;
+    SCR.legs[g].position.y = 0.20 - sl / 2;
+  }
+
   var dl = Math.max(0.25, -floorLocal);
   for (var k = 0; k < 3; k++) {
     diffPads[k].pole.scale.y = dl;
@@ -697,7 +706,77 @@ function buildBalloon() {
 }
 
 /* ============================================================
-   7. 글자판
+   7. 스크린 — 순서를 여기서 보여줍니다.
+   등 뒤 버튼이 켜져도 화면만 보고 있으면 색을 놓치지 않습니다.
+   ============================================================ */
+var SCR = { w: 1.30, h: 0.60, title: '', sub: '', tcol: '#f2eefc', flash: -1, flashT: 0 };
+
+function buildScreen() {
+  var c = document.createElement('canvas');
+  c.width = 1024; c.height = Math.round(1024 * SCR.h / SCR.w);
+  SCR.canvas = c; SCR.ctx = c.getContext('2d');
+  SCR.tex = new THREE.CanvasTexture(c);
+
+  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(SCR.w, SCR.h),
+    new THREE.MeshBasicMaterial({ map: SCR.tex }));    // 발광하는 화면이라 조명 영향 없음
+  mesh.position.set(0, 0.20, -1.30);
+  rig.add(mesh);
+  SCR.mesh = mesh;
+
+  // 화면 테두리
+  var frame = new THREE.Mesh(new THREE.BoxGeometry(SCR.w + 0.08, SCR.h + 0.08, 0.05), darkMat);
+  frame.position.set(0, 0.20, -1.335);
+  rig.add(frame);
+
+  // 바닥까지 내려가는 받침 기둥 두 개
+  SCR.legs = [];
+  for (var i = 0; i < 2; i++) {
+    var leg = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.03, 1, 10), metalMat);
+    leg.position.set((i === 0 ? -1 : 1) * 0.45, 0, -1.335);
+    rig.add(leg);
+    SCR.legs.push(leg);
+  }
+  paintScreen();
+}
+
+function paintScreen() {
+  var x = SCR.ctx, W = SCR.canvas.width, H = SCR.canvas.height;
+
+  if (SCR.flash >= 0) {
+    // 색 재생 중 — 화면 전체가 그 색이 됩니다
+    var col = '#' + HUES[SCR.flash].toString(16).padStart(6, '0');
+    x.fillStyle = col; x.fillRect(0, 0, W, H);
+    // 가운데 큰 원으로 한 번 더 강조
+    x.fillStyle = 'rgba(255,255,255,0.22)';
+    x.beginPath(); x.arc(W / 2, H / 2, H * 0.32, 0, Math.PI * 2); x.fill();
+  } else {
+    x.fillStyle = '#0d0d14'; x.fillRect(0, 0, W, H);
+    // 화면 질감
+    x.fillStyle = 'rgba(255,255,255,0.02)';
+    for (var s = 0; s < H; s += 4) x.fillRect(0, s, W, 1);
+
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.fillStyle = SCR.tcol;
+    x.font = "700 96px 'Noto Sans KR', system-ui, sans-serif";
+    x.fillText(SCR.title, W / 2, H * 0.38);
+    x.fillStyle = '#a99fd0';
+    x.font = "600 48px 'Noto Sans KR', system-ui, sans-serif";
+    x.fillText(SCR.sub, W / 2, H * 0.68);
+  }
+  SCR.tex.needsUpdate = true;
+}
+
+function screenFlash(padIdx) { SCR.flash = padIdx; SCR.flashT = 0.001; paintScreen(); }
+function screenClear() { if (SCR.flash >= 0) { SCR.flash = -1; paintScreen(); } }
+function screenMsg(title, subtitle, color) {
+  SCR.title = title; SCR.sub = subtitle;
+  SCR.tcol = color || '#f2eefc';
+  SCR.flash = -1;
+  paintScreen();
+}
+
+/* ============================================================
+   8. 작은 글자판 (난이도 이름표, 진단용)
    ============================================================ */
 function makePanel(w, h, px) {
   var c = document.createElement('canvas');
@@ -722,16 +801,8 @@ function drawPanel(p, text, color, size) {
   p.tex.needsUpdate = true;
 }
 function buildHud() {
-  hud = makePanel(1.05, 0.22, 800);
-  hud.mesh.position.set(0, 0.28, -1.24);
-  rig.add(hud.mesh);
-
-  sub = makePanel(0.88, 0.13, 660);
-  sub.mesh.position.set(0, 0.10, -1.24);
-  rig.add(sub.mesh);
-
   dbg = makePanel(0.70, 0.09, 768);
-  dbg.mesh.position.set(0, -0.30, -0.58);
+  dbg.mesh.position.set(0, -0.34, -0.58);
   dbg.mesh.rotation.x = -0.6;
   dbg.mesh.visible = CFG.debug;
   rig.add(dbg.mesh);
@@ -769,6 +840,14 @@ function riseSound(freq) {
   osc.connect(amp); amp.connect(audioCtx.destination);
   osc.start(t); osc.stop(t + 0.55);
 }
+// 색마다 음 높이가 다르고, 네 개 묶음마다 음색까지 달라집니다.
+// 소리만 듣고도 어느 버튼인지 구분할 수 있게 하려는 것입니다.
+var WAVES = ['sine', 'triangle', 'square', 'sawtooth'];
+var WAVE_GAIN = [0.24, 0.20, 0.11, 0.09];   // 거친 파형은 작게 — 아이 귀에 부담 없게
+function padTone(i, dur) {
+  var g = Math.floor(i / 4);
+  tone(NOTES[i], dur || 0.4, WAVES[g], WAVE_GAIN[g]);
+}
 function chord(freqs) {
   freqs.forEach(function (f, i) { setTimeout(function () { tone(f, 0.45); }, i * 70); });
 }
@@ -784,11 +863,10 @@ function toSelect() {
   padRing.rotation.y = 0; spinAmt = 0;
   balloon.visible = false;
   resetLights();
-  drawPanel(hud, '난이도를 골라요', '#ffd166', 92);
   var anyBest = best.easy || best.normal || best.hard;
-  drawPanel(sub, anyBest
-    ? '최고 기록  쉬움 ' + best.easy + ' · 보통 ' + best.normal + ' · 어려움 ' + best.hard
-    : '순서를 기억해서 따라 하세요', '#b9aee0', anyBest ? 42 : 56);
+  screenMsg('난이도를 골라요', anyBest
+    ? '최고 기록   쉬움 ' + best.easy + '   보통 ' + best.normal + '   어려움 ' + best.hard
+    : '순서를 기억해서 따라 하세요', '#ffd166');
 }
 
 function startGame(diff) {
@@ -806,8 +884,7 @@ function startGame(diff) {
   growSequence();
   state = 'INTRO';
   timer = 2.2;
-  drawPanel(hud, animal.name + '이 내려와요', '#ffd166', 88);
-  drawPanel(sub, D.interfere ? animal.hint : '버튼을 맞히면 다시 올라가요', '#b9aee0', 52);
+  screenMsg(animal.name + '이 내려와요', D.interfere ? animal.hint : '버튼을 맞히면 다시 올라가요', '#ffd166');
   chord([523.25, 659.25, 783.99]);
 }
 
@@ -831,8 +908,7 @@ function nextRound() {
     growSequence();
     state = 'EXPAND';
     timer = 2.4;
-    drawPanel(hud, '버튼 ' + padCount + '개!', '#ffd166', 92);
-    drawPanel(sub, D.interfere ? animal.name + ' — ' + animal.hint : '순서가 처음부터 다시 시작돼요', '#b9aee0', 50);
+    screenMsg('버튼 ' + padCount + '개!', D.interfere ? animal.name + ' — ' + animal.hint : '순서가 처음부터 다시 시작돼요', '#ffd166');
     chord([392, 523.25, 659.25, 783.99]);
     return;
   }
@@ -845,8 +921,7 @@ function beginShow() {
   playIdx = 0; timer = 0.7; litPad = -1;
   padRing.rotation.y = 0; spinAmt = 0;
   if (D.interfere && animal.power === 'block') blockT = 0;
-  drawPanel(hud, '잘 보세요', '#f2eefc', 92);
-  drawPanel(sub, '레벨 ' + level + '   버튼 ' + padCount + '개', '#b9aee0', 52);
+  screenMsg('잘 보세요', '레벨 ' + level + '   버튼 ' + padCount + '개', '#f2eefc');
 }
 
 function toInput() {
@@ -854,8 +929,7 @@ function toInput() {
   inputIdx = 0; timer = D.inputTimeout;
   blockT = -1; balloon.visible = false;
   resetLights();
-  drawPanel(hud, '따라 해요', '#4ecda4', 92);
-  drawPanel(sub, '0 / ' + sequence.length, '#b9aee0', 56);
+  screenMsg('따라 해요', '0 / ' + sequence.length, '#4ecda4');
 }
 
 function gameOver(caught) {
@@ -870,9 +944,8 @@ function gameOver(caught) {
   var score = level - 1;
   var isBest = score > best[D.key];
   if (isBest) best[D.key] = score;
-  drawPanel(hud, score > 0 ? '레벨 ' + score + '!' : '아쉬워요', '#ffd166', 104);
-  drawPanel(sub, caught ? animal.name + '한테 잡혔어요' :
-    (isBest && score > 0 ? D.name + ' 최고 기록이에요' : '다시 해볼까요'), '#b9aee0', 52);
+  screenMsg(score > 0 ? '레벨 ' + score + '!' : '아쉬워요', caught ? animal.name + '한테 잡혔어요' :
+    (isBest && score > 0 ? D.name + ' 최고 기록이에요' : '다시 해볼까요'), '#ffd166');
 }
 
 function resetLights() {
@@ -938,7 +1011,8 @@ function checkTouch(pad, tips) {
 
 function hitPad(i) {
   pads[i].lit = 1; pads[i].press = 1;
-  if (!muted()) tone(NOTES[i], 0.42);
+  screenFlash(i); SCR.flashT = 0.30;        // 누른 색을 잠깐 화면에 보여줍니다
+  padTone(i, 0.42);                          // 누를 때는 방해 중에도 소리가 납니다
   buzz(0.5, 45);
 
   if (sequence[inputIdx] === i) {
@@ -946,12 +1020,11 @@ function hitPad(i) {
     timer = D.inputTimeout;
     descY = Math.min(CFG.descStart, descY + D.step);      // 맞히면 뒤로 올라갑니다
     descKick = 1;                                          // 실제 이동폭보다 크게 보이도록 튕김 연출
-    drawPanel(sub, inputIdx + ' / ' + sequence.length, '#b9aee0', 56);
+    SCR.sub = inputIdx + ' / ' + sequence.length;   // 다음 paintScreen에서 반영됩니다
     if (inputIdx >= sequence.length) {
       state = 'GOOD'; timer = 1.15;
       chord([659.25, 783.99, 1046.5]);
-      drawPanel(hud, '맞았어요', '#4ecda4', 92);
-      drawPanel(sub, '다음 레벨', '#b9aee0', 52);
+      screenMsg('맞았어요', '다음 레벨', '#4ecda4');
     }
   } else {
     // 틀리면 즉시 종료가 아니라, 더 빨리 내려옵니다
@@ -962,8 +1035,7 @@ function hitPad(i) {
     if (descY <= CFG.descEnd) { gameOver(true); return; }
     inputIdx = 0;
     state = 'SHOW'; playIdx = 0; timer = 0.9; litPad = -1;
-    drawPanel(hud, '다시 볼게요', '#ff9d5c', 92);
-    drawPanel(sub, '처음부터 따라 해요', '#b9aee0', 52);
+    screenMsg('다시 볼게요', '처음부터 따라 해요', '#ff9d5c');
   }
 }
 
@@ -998,6 +1070,12 @@ function loop(time, frame) {
   }
 
   var tips = renderer.xr.isPresenting ? touchPoints() : [];
+
+  // 누른 색을 잠깐 보여준 뒤 진행 표시로 되돌립니다
+  if (SCR.flashT > 0) {
+    SCR.flashT -= dt;
+    if (SCR.flashT <= 0 && state === 'INPUT') screenClear();
+  }
 
   if (CFG.debug && renderer.xr.isPresenting) {
     dbgTick += dt;
@@ -1056,12 +1134,14 @@ function loop(time, frame) {
     if (timer <= 0) {
       if (litPad >= 0) {
         litPad = -1; timer = gapTime();
+        screenClear();
         if (playIdx >= sequence.length) toInput();
       } else {
         var lt = litTime();
         litPad = sequence[playIdx];
         pads[litPad].lit = 1; pads[litPad].press = 1;
-        if (!muted()) tone(NOTES[litPad], lt * 0.9);
+        screenFlash(litPad);                    // 스크린에도 같은 색을 띄웁니다
+        if (!muted()) padTone(litPad, lt * 0.9);
         playIdx++; timer = lt;
       }
     }
@@ -1072,7 +1152,7 @@ function loop(time, frame) {
       descY -= D.wrongDrop; descMul *= D.wrongMul;
       if (descY <= CFG.descEnd) { gameOver(true); }
       else { inputIdx = 0; state = 'SHOW'; playIdx = 0; timer = 0.9; litPad = -1;
-             drawPanel(hud, '다시 볼게요', '#ff9d5c', 92); }
+             screenMsg('다시 볼게요', SCR.sub, '#ff9d5c'); }
     } else {
       for (var i = 0; i < padCount; i++) {
         if (checkTouch(pads[i], tips)) { hitPad(i); break; }
@@ -1093,7 +1173,7 @@ function loop(time, frame) {
     descKick = Math.max(0, descKick - dt * 3.4);
     var shown = descY + descKick * 0.17;      // 눈에 보이는 높이 (튕김 포함)
     descGroup.position.y = shown;
-    var ropeTop = 3.4;
+    var ropeTop = CFG.ropeTop;
     var rl = Math.max(0.1, ropeTop - shown);
     rope.scale.y = rl; rope.position.y = rl / 2 + 0.02;
     descGroup.rotation.y = Math.sin(t * 0.6) * 0.22;
