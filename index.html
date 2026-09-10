@@ -669,10 +669,10 @@ function fitPoles() {
     p.base.position.set(0, p.slot.y - len + 0.012, ARM);
   }
   // 스크린 받침
-  var sl = Math.max(0.3, 0.20 - floorLocal);
+  var sl = Math.max(0.3, (SCR.y - SCR.h / 2) - floorLocal);
   for (var g = 0; g < SCR.legs.length; g++) {
     SCR.legs[g].scale.y = sl;
-    SCR.legs[g].position.y = 0.20 - sl / 2;
+    SCR.legs[g].position.y = (SCR.y - SCR.h / 2) - sl / 2;
   }
 
   var dl = Math.max(0.25, -floorLocal);
@@ -709,30 +709,31 @@ function buildBalloon() {
    7. 스크린 — 순서를 여기서 보여줍니다.
    등 뒤 버튼이 켜져도 화면만 보고 있으면 색을 놓치지 않습니다.
    ============================================================ */
-var SCR = { w: 1.30, h: 0.60, title: '', sub: '', tcol: '#f2eefc', flash: -1, flashT: 0 };
+// 스크린 위치는 계산으로 정한 값입니다. 버튼도 캐릭터도 화면을 가리지 않습니다.
+// 옮기려면 SCR.z / SCR.y 만 바꾸세요. 받침 기둥은 알아서 따라옵니다.
+var SCR = { w: 1.85, h: 0.84, z: -2.40, y: 0.10,
+            title: '', sub: '', tcol: '#f2eefc', flash: -1, flashT: 0 };
 
 function buildScreen() {
   var c = document.createElement('canvas');
-  c.width = 1024; c.height = Math.round(1024 * SCR.h / SCR.w);
+  c.width = 1152; c.height = Math.round(1152 * SCR.h / SCR.w);
   SCR.canvas = c; SCR.ctx = c.getContext('2d');
   SCR.tex = new THREE.CanvasTexture(c);
 
   var mesh = new THREE.Mesh(new THREE.PlaneGeometry(SCR.w, SCR.h),
-    new THREE.MeshBasicMaterial({ map: SCR.tex }));    // 발광하는 화면이라 조명 영향 없음
-  mesh.position.set(0, 0.20, -1.30);
+    new THREE.MeshBasicMaterial({ map: SCR.tex }));    // 조명 영향을 안 받아 어두워져도 또렷합니다
+  mesh.position.set(0, SCR.y, SCR.z);
   rig.add(mesh);
   SCR.mesh = mesh;
 
-  // 화면 테두리
-  var frame = new THREE.Mesh(new THREE.BoxGeometry(SCR.w + 0.08, SCR.h + 0.08, 0.05), darkMat);
-  frame.position.set(0, 0.20, -1.335);
+  var frame = new THREE.Mesh(new THREE.BoxGeometry(SCR.w + 0.10, SCR.h + 0.10, 0.06), darkMat);
+  frame.position.set(0, SCR.y, SCR.z - 0.04);
   rig.add(frame);
 
-  // 바닥까지 내려가는 받침 기둥 두 개
   SCR.legs = [];
   for (var i = 0; i < 2; i++) {
-    var leg = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.03, 1, 10), metalMat);
-    leg.position.set((i === 0 ? -1 : 1) * 0.45, 0, -1.335);
+    var leg = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.036, 1, 10), metalMat);
+    leg.position.set((i === 0 ? -1 : 1) * 0.66, 0, SCR.z - 0.04);
     rig.add(leg);
     SCR.legs.push(leg);
   }
@@ -757,11 +758,11 @@ function paintScreen() {
 
     x.textAlign = 'center'; x.textBaseline = 'middle';
     x.fillStyle = SCR.tcol;
-    x.font = "700 96px 'Noto Sans KR', system-ui, sans-serif";
-    x.fillText(SCR.title, W / 2, H * 0.38);
+    x.font = "700 116px 'Noto Sans KR', system-ui, sans-serif";
+    x.fillText(SCR.title, W / 2, H * 0.37);
     x.fillStyle = '#a99fd0';
-    x.font = "600 48px 'Noto Sans KR', system-ui, sans-serif";
-    x.fillText(SCR.sub, W / 2, H * 0.68);
+    x.font = "600 58px 'Noto Sans KR', system-ui, sans-serif";
+    x.fillText(SCR.sub, W / 2, H * 0.69);
   }
   SCR.tex.needsUpdate = true;
 }
@@ -1060,7 +1061,8 @@ function loop(time, frame) {
           var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, pp.y / CFG.refEyeHeight));
           rig.scale.setScalar(sc);
           rig.position.set(pp.x, pp.y - CFG.padDrop * sc, pp.z);
-          rig.rotation.y = Math.atan2(hx, hz);
+          // rig의 로컬 -z가 시선 방향과 같아지도록. 부호를 빼면 정확히 등 뒤로 갑니다
+          rig.rotation.y = Math.atan2(-hx, -hz);
           fitPoles();
           calibrated = true;
           say('cal', '보정', '눈높이 ' + pp.y.toFixed(2) + 'm · 배율 ' + sc.toFixed(2), 'ok');
