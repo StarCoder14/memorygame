@@ -113,6 +113,8 @@ var CFG = {
   // 스테이지가 등 뒤에 생기면 이 값을 Math.PI 로 바꾸세요 (0 <-> Math.PI)
   yawOffset:    0,
   recenterHold: 1.2,    // 컨트롤러 버튼을 이만큼 누르고 있으면 자리를 다시 잡습니다(초)
+  followDead:   0.20,   // 메뉴에서 시선을 따라가기 시작하는 각도(라디안, 약 11도)
+  followRate:   2.5,    // 따라가는 속도. 크면 빠르고 어지럽습니다
 
   debug:        true
 };
@@ -893,7 +895,7 @@ function toSelect() {
   var anyBest = best.easy || best.normal || best.hard;
   screenMsg('난이도를 골라요', anyBest
     ? '최고 기록   쉬움 ' + best.easy + '   보통 ' + best.normal + '   어려움 ' + best.hard
-    : '컨트롤러 버튼을 길게 누르면 자리가 맞춰져요', '#ffd166');
+    : '고개를 돌리면 따라와요. 난이도를 고르면 그 자리에 고정돼요', '#ffd166');
 }
 
 function startGame(diff) {
@@ -1004,6 +1006,46 @@ function applyInterference(dt) {
                          0.30 + Math.cos(blockT * 2) * 0.10,
                          -0.50);
   }
+}
+
+// 메뉴 화면에서는 스테이지가 플레이어를 따라다닙니다.
+// 어디를 보고 있든 메뉴는 항상 눈앞에 있고, 난이도를 고르는 순간 그 자리에 고정됩니다.
+function followPlayer(dt, frame) {
+  if (!renderer.xr.isPresenting || state !== 'SELECT') return;
+  var rs = renderer.xr.getReferenceSpace();
+  var pose = (rs && frame) ? frame.getViewerPose(rs) : null;
+  if (!pose) return;
+
+  var pp = pose.transform.position, po = pose.transform.orientation;
+  _q.set(po.x, po.y, po.z, po.w);
+  _p.set(0, 0, -1).applyQuaternion(_q);
+  var hx = _p.x, hz = _p.z;
+  var hlen = Math.sqrt(hx * hx + hz * hz);
+  var eyeY = pp.y > 0.6 ? pp.y : CFG.refEyeHeight;
+  var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, eyeY / CFG.refEyeHeight));
+  var targetY = eyeY - CFG.padDrop * sc + CFG.stageLift;
+
+  var snap = !calibrated;                       // 처음 한 번은 즉시
+  var k = snap ? 1 : Math.min(1, dt * CFG.followRate);
+
+  rig.scale.setScalar(sc);
+  rig.position.x += (pp.x - rig.position.x) * k;
+  rig.position.z += (pp.z - rig.position.z) * k;
+  rig.position.y += (targetY - rig.position.y) * k;
+
+  if (hlen > 0.12) {
+    var want = Math.atan2(-hx, -hz) + CFG.yawOffset;
+    var d = want - rig.rotation.y;
+    while (d >  Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    if (snap || Math.abs(d) > CFG.followDead) rig.rotation.y += d * k;
+  }
+
+  fitPoles();
+  calibrated = true;
+  calEye = eyeY;
+  calYaw = rig.rotation.y * 180 / Math.PI;
+  rig.visible = true;
 }
 
 // 스테이지를 플레이어 기준으로 세웁니다
@@ -1152,8 +1194,8 @@ function loop(time, frame) {
   if (renderer.xr.isPresenting) {
     var wantRecenter = recenterHeld > CFG.recenterHold;
 
-    // 처음 들어왔을 때는 한 번 자동으로 세워줍니다 (안 그러면 아무것도 안 보임)
-    if (!calibrated) { settle -= dt; if (settle <= 0) wantRecenter = true; }
+    // 메뉴에서는 followPlayer 가 계속 맞춰주므로 여기서는 손대지 않습니다
+    if (!calibrated && state !== 'SELECT') { settle -= dt; if (settle <= 0) wantRecenter = true; }
 
     if (wantRecenter) {
       var refSpace = renderer.xr.getReferenceSpace();
@@ -1181,6 +1223,7 @@ function loop(time, frame) {
   }
 
   pollRecenter(dt);
+  followPlayer(dt, frame);
 
   if (!renderer.xr.isPresenting) rig.visible = true;
 
