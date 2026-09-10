@@ -112,6 +112,7 @@ var CFG = {
 
   // 스테이지가 등 뒤에 생기면 이 값을 Math.PI 로 바꾸세요 (0 <-> Math.PI)
   yawOffset:    0,
+  recenterHold: 1.2,    // 컨트롤러 버튼을 이만큼 누르고 있으면 자리를 다시 잡습니다(초)
 
   debug:        true
 };
@@ -164,7 +165,7 @@ var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
 var best = { easy: 0, normal: 0, hard: 0 }, calibrated = false, settle = 0, dbgTick = 0;
 var padCount = 4, D = DIFFS[1], animal = null, animalMesh = null;
 var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null;
-var calYaw = 0, calEye = 0, calFallback = false, calWait = 0;
+var calYaw = 0, calEye = 0, calFallback = false, calWait = 0, recenterHeld = 0;
 var spinAmt = 0, darkAmt = 0, blockT = -1;
 var _v, _p, _q, ray;
 
@@ -266,8 +267,8 @@ function setupVRButton() {
         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
       }).then(function (session) {
         renderer.xr.setSession(session);
-        rig.visible = false;      // 보정 전까지 숨깁니다. 엉뚱한 자리에 떴다 튀는 걸 막습니다
-        calWait = 0;
+        rig.visible = false;      // 보정 전까지 숨깁니다
+        calibrated = false; settle = CFG.settleTime; calWait = 0; recenterHeld = 0;
         initAudio(); toSelect();
         document.getElementById('diag').style.display = 'none';
         btn.style.display = 'none';
@@ -885,14 +886,14 @@ function chord(freqs) {
    ============================================================ */
 function toSelect() {
   state = 'SELECT';
-  calibrated = false; settle = CFG.settleTime; calWait = 0;
+  // 여기서 다시 보정하지 않습니다. 한 번 맞춘 자리를 계속 씁니다
   showPads(0); showDiff(true);
   descGroup.visible = false;
   clearInterference(); resetRing();
   var anyBest = best.easy || best.normal || best.hard;
   screenMsg('난이도를 골라요', anyBest
     ? '최고 기록   쉬움 ' + best.easy + '   보통 ' + best.normal + '   어려움 ' + best.hard
-    : '순서를 기억해서 따라 하세요', '#ffd166');
+    : '컨트롤러 버튼을 길게 누르면 자리가 맞춰져요', '#ffd166');
 }
 
 function startGame(diff) {
@@ -1070,6 +1071,23 @@ function touchPoints() {
   }
   return out;
 }
+// 컨트롤러 아무 버튼이나 길게 누르면 자리 맞추기
+function pollRecenter(dt) {
+  if (!renderer.xr.isPresenting) return;
+  var session = renderer.xr.getSession();
+  var srcs = (session && session.inputSources) ? session.inputSources : [];
+  var pressed = false;
+  for (var i = 0; i < srcs.length; i++) {
+    var gp = srcs[i].gamepad;
+    if (!gp || !gp.buttons) continue;
+    for (var b = 0; b < gp.buttons.length; b++) {
+      if (gp.buttons[b] && gp.buttons[b].pressed) { pressed = true; break; }
+    }
+    if (pressed) break;
+  }
+  recenterHeld = pressed ? recenterHeld + dt : 0;
+}
+
 function buzz(strength, ms) {
   var session = renderer.xr.getSession();
   if (!session || !session.inputSources) return;
@@ -1129,10 +1147,15 @@ function loop(time, frame) {
   var dt = Math.min(clock.getDelta(), 0.05);
   var t = (time || 0) * 0.001;
 
-  if (renderer.xr.isPresenting && !calibrated) {
-    settle -= dt;
-    calWait += dt;
-    if (settle <= 0) {
+  // 자리 맞추기 — 자동으로 재지 않습니다.
+  // 고개가 어디를 향하든 상관없이, 버튼을 눌러 원하는 순간에만 맞춥니다.
+  if (renderer.xr.isPresenting) {
+    var wantRecenter = recenterHeld > CFG.recenterHold;
+
+    // 처음 들어왔을 때는 한 번 자동으로 세워줍니다 (안 그러면 아무것도 안 보임)
+    if (!calibrated) { settle -= dt; if (settle <= 0) wantRecenter = true; }
+
+    if (wantRecenter) {
       var refSpace = renderer.xr.getReferenceSpace();
       var pose = (refSpace && frame) ? frame.getViewerPose(refSpace) : null;
       if (pose) {
@@ -1140,19 +1163,24 @@ function loop(time, frame) {
         _q.set(po.x, po.y, po.z, po.w);
         _p.set(0, 0, -1).applyQuaternion(_q);
         var hx = _p.x, hz = _p.z;
-        if (pp.y > 0.6 && Math.sqrt(hx * hx + hz * hz) > 0.12) {
-          placeStage(pp.x, pp.y, pp.z, Math.atan2(-hx, -hz));
-          calFallback = false;
-        }
-      }
-      // 3초 안에 머리 위치를 못 읽으면 기본값으로라도 세웁니다.
-      // 이게 없으면 스테이지가 초기 위치(바닥 근처)에 그대로 남습니다.
-      if (!calibrated && calWait > 3.0) {
+        var hlen = Math.sqrt(hx * hx + hz * hz);
+        var eyeY = pp.y > 0.6 ? pp.y : CFG.refEyeHeight;
+        // 고개를 숙이고 있어 수평 방향을 못 읽으면 이전 방향을 유지합니다
+        var yaw = hlen > 0.12 ? Math.atan2(-hx, -hz) : (rig.rotation.y - CFG.yawOffset);
+        placeStage(pp.x, eyeY, pp.z, yaw);
+        calFallback = (pp.y <= 0.6);
+        recenterHeld = 0;
+        tone(880, 0.18); tone(1320, 0.18);
+        buzz(0.8, 120);
+      } else if (!calibrated && calWait > 3.0) {
         placeStage(0, CFG.refEyeHeight, 0, 0);
         calFallback = true;
       }
+      calWait += dt;
     }
   }
+
+  pollRecenter(dt);
 
   if (!renderer.xr.isPresenting) rig.visible = true;
 
