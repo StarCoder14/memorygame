@@ -87,10 +87,12 @@ var CFG = {
   spawnTime:    0.75,
   spawnDrop:    0.85,
 
-  descStart:    1.52,   // 캐릭터가 내려오기 시작하는 높이 (눈높이보다 약 1.1m 위)
+  descStart:    1.52,   // 올라갈 수 있는 최고 높이 (눈높이보다 약 1.1m 위)
   descEnd:      0.52,   // 여기까지 내려오면 끝 (눈높이 살짝 위)
+  descBegin:    1.24,   // 게임 시작 높이. 천장에 붙여두면 눌러도 안 올라가 보입니다
   ropeTop:      2.55,   // 줄이 매달린 천장 지점
-  speedGrow:    0.055,  // 레벨당 하강 속도 증가율
+  speedGrow:    0.180,  // 레벨당 하강 속도 증가율
+  kickHeight:   0.30,   // 맞혔을 때 튕겨 오르는 연출 높이(m)
 
   touchRadius:  0.085,
   wandLength:   0.26,
@@ -100,20 +102,28 @@ var CFG = {
   maxScale:     1.12,
   gameOverHold: 5.0,
   settleTime:   1.0,
+
+  playSpeedUp:  0.965,  // 레벨마다 재생이 3.5%씩 빨라집니다
+  litMin:       0.26,   // 아무리 빨라져도 이보다 짧아지지 않음
+  gapMin:       0.10,
+
+  // 스테이지가 등 뒤에 생기면 이 값을 Math.PI 로 바꾸세요 (0 <-> Math.PI)
+  yawOffset:    0,
+
   debug:        true
 };
 
-// 난이도 3종 — 4000회 플레이 시뮬레이션으로 맞춘 값입니다.
-// 어느 난이도든 대략 45~85초에 끝나도록 조정돼 있습니다 (부스 회전율 기준).
+// 난이도 3종 — 5000회 시뮬레이션으로 맞춘 값입니다.
+// step 은 전체 구간(1.00m)의 10~12%라서 맞힐 때마다 눈에 띄게 밀려납니다.
 var DIFFS = [
   { key:'easy',   name:'쉬움',   color:0x3ecf8e,
-    startPads:4, speed:0.030, step:0.070, wrongDrop:0.085, wrongMul:1.08,
+    startPads:4, speed:0.026, step:0.10, wrongDrop:0.15, wrongMul:1.10,
     expandEvery:8, lit:0.80, gap:0.32, inputTimeout:9.0, interfere:false },
   { key:'normal', name:'보통',   color:0xffc93c,
-    startPads:6, speed:0.025, step:0.060, wrongDrop:0.135, wrongMul:1.16,
+    startPads:6, speed:0.023, step:0.11, wrongDrop:0.19, wrongMul:1.16,
     expandEvery:6, lit:0.62, gap:0.24, inputTimeout:8.0, interfere:false },
   { key:'hard',   name:'어려움', color:0xff5d5d,
-    startPads:8, speed:0.022, step:0.050, wrongDrop:0.180, wrongMul:1.22,
+    startPads:8, speed:0.017, step:0.12, wrongDrop:0.24, wrongMul:1.22,
     expandEvery:5, lit:0.48, gap:0.17, inputTimeout:7.0, interfere:true }
 ];
 
@@ -149,14 +159,18 @@ var state = 'SELECT', sequence = [], level = 1;
 var playIdx = 0, inputIdx = 0, timer = 0, litPad = -1;
 var best = { easy: 0, normal: 0, hard: 0 }, calibrated = false, settle = 0, dbgTick = 0;
 var padCount = 4, D = DIFFS[1], animal = null, animalMesh = null;
-var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null;
+var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null, calYaw = 0;
 var spinAmt = 0, darkAmt = 0, blockT = -1;
 var _v, _p, _q, ray;
 
 function padsForLevel(lv) { return Math.min(16, D.startPads + 4 * Math.floor((lv - 1) / D.expandEvery)); }
 function descSpeed() { return D.speed * (1 + (level - 1) * CFG.speedGrow) * descMul; }
-function litTime() { return D.lit * (animal && D.interfere && animal.power === 'fast' ? 0.70 : 1); }
-function gapTime() { return D.gap * (animal && D.interfere && animal.power === 'fast' ? 0.70 : 1); }
+
+// 레벨이 오를수록 순서 재생이 조금씩 빨라집니다
+function fastMul() { return (animal && D.interfere && animal.power === 'fast') ? 0.70 : 1; }
+function levelMul() { return Math.pow(CFG.playSpeedUp, level - 1); }
+function litTime() { return Math.max(CFG.litMin, D.lit * levelMul()) * fastMul(); }
+function gapTime() { return Math.max(CFG.gapMin, D.gap * levelMul()) * fastMul(); }
 function muted()   { return !!(animal && D.interfere && animal.power === 'mute'); }
 
 /* ============================================================
@@ -642,10 +656,10 @@ function buildDiffButtons() {
     var B = makeButton(DIFFS[i].color, 0.098, CFG.padTilt);
     unit.add(B.group);
 
-    // 이름표
-    var lab = makePanel(0.30, 0.10, 320);
-    drawPanel(lab, DIFFS[i].name, '#ffffff', 108);
-    lab.mesh.position.set(0, 0.20, 0.02);
+    // 이름표 — 버튼 개수를 같이 적어 헷갈리지 않게
+    var lab = makePanel(0.42, 0.11, 420);
+    drawPanel(lab, DIFFS[i].name + ' ' + DIFFS[i].startPads, '#ffffff', 82);
+    lab.mesh.position.set(0, 0.21, -0.03);
     lab.mesh.rotation.y = Math.PI;
     unit.add(lab.mesh);
 
@@ -712,7 +726,7 @@ function buildBalloon() {
 // 스크린 위치는 계산으로 정한 값입니다. 버튼도 캐릭터도 화면을 가리지 않습니다.
 // 옮기려면 SCR.z / SCR.y 만 바꾸세요. 받침 기둥은 알아서 따라옵니다.
 var SCR = { w: 1.85, h: 0.84, z: -2.40, y: 0.10,
-            title: '', sub: '', tcol: '#f2eefc', flash: -1, flashT: 0 };
+            title: '', sub: '', tcol: '#f2eefc', flash: -1, flashT: 0, quiet: false };
 
 function buildScreen() {
   var c = document.createElement('canvas');
@@ -752,27 +766,31 @@ function paintScreen() {
     x.beginPath(); x.arc(W / 2, H / 2, H * 0.32, 0, Math.PI * 2); x.fill();
   } else {
     x.fillStyle = '#0d0d14'; x.fillRect(0, 0, W, H);
-    // 화면 질감
     x.fillStyle = 'rgba(255,255,255,0.02)';
     for (var s = 0; s < H; s += 4) x.fillRect(0, s, W, 1);
 
-    x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.fillStyle = SCR.tcol;
-    x.font = "700 116px 'Noto Sans KR', system-ui, sans-serif";
-    x.fillText(SCR.title, W / 2, H * 0.37);
-    x.fillStyle = '#a99fd0';
-    x.font = "600 58px 'Noto Sans KR', system-ui, sans-serif";
-    x.fillText(SCR.sub, W / 2, H * 0.69);
+    // 순서를 보여주는 동안에는 글자를 띄우지 않습니다.
+    // 색과 색 사이에 글자가 끼면 집중이 끊깁니다.
+    if (!SCR.quiet) {
+      x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillStyle = SCR.tcol;
+      x.font = "700 116px 'Noto Sans KR', system-ui, sans-serif";
+      x.fillText(SCR.title, W / 2, H * 0.37);
+      x.fillStyle = '#a99fd0';
+      x.font = "600 58px 'Noto Sans KR', system-ui, sans-serif";
+      x.fillText(SCR.sub, W / 2, H * 0.69);
+    }
   }
   SCR.tex.needsUpdate = true;
 }
 
 function screenFlash(padIdx) { SCR.flash = padIdx; SCR.flashT = 0.001; paintScreen(); }
 function screenClear() { if (SCR.flash >= 0) { SCR.flash = -1; paintScreen(); } }
+function screenQuiet(on) { if (SCR.quiet !== on) { SCR.quiet = on; paintScreen(); } }
 function screenMsg(title, subtitle, color) {
   SCR.title = title; SCR.sub = subtitle;
   SCR.tcol = color || '#f2eefc';
-  SCR.flash = -1;
+  SCR.flash = -1; SCR.quiet = false;
   paintScreen();
 }
 
@@ -875,7 +893,7 @@ function startGame(diff) {
   level = 1;
   sequence = [];
   padCount = padsForLevel(level);
-  descY = CFG.descStart;
+  descY = CFG.descBegin;      // 천장에 붙이지 않아야 첫 정답부터 올라갑니다
   descMul = 1;
   descKick = 0;
   showDiff(false);
@@ -922,7 +940,7 @@ function beginShow() {
   playIdx = 0; timer = 0.7; litPad = -1;
   padRing.rotation.y = 0; spinAmt = 0;
   if (D.interfere && animal.power === 'block') blockT = 0;
-  screenMsg('잘 보세요', '레벨 ' + level + '   버튼 ' + padCount + '개', '#f2eefc');
+  screenMsg('잘 보세요', D.name + '   레벨 ' + level + '   버튼 ' + padCount + '개', '#f2eefc');
 }
 
 function toInput() {
@@ -930,6 +948,7 @@ function toInput() {
   inputIdx = 0; timer = D.inputTimeout;
   blockT = -1; balloon.visible = false;
   resetLights();
+  SCR.quiet = false;
   screenMsg('따라 해요', '0 / ' + sequence.length, '#4ecda4');
 }
 
@@ -1062,10 +1081,12 @@ function loop(time, frame) {
           rig.scale.setScalar(sc);
           rig.position.set(pp.x, pp.y - CFG.padDrop * sc, pp.z);
           // rig의 로컬 -z가 시선 방향과 같아지도록. 부호를 빼면 정확히 등 뒤로 갑니다
-          rig.rotation.y = Math.atan2(-hx, -hz);
+          rig.rotation.y = Math.atan2(-hx, -hz) + CFG.yawOffset;
           fitPoles();
           calibrated = true;
-          say('cal', '보정', '눈높이 ' + pp.y.toFixed(2) + 'm · 배율 ' + sc.toFixed(2), 'ok');
+          calYaw = rig.rotation.y * 180 / Math.PI;
+          say('cal', '보정', '눈높이 ' + pp.y.toFixed(2) + 'm · 배율 ' + sc.toFixed(2) +
+              ' · 방향 ' + calYaw.toFixed(0) + '도', 'ok');
         }
       }
     }
@@ -1083,8 +1104,8 @@ function loop(time, frame) {
     dbgTick += dt;
     if (dbgTick > 0.25) {
       dbgTick = 0;
-      drawPanel(dbg, '입력 ' + dbgSrcs + ' · 컨트롤러 ' + dbgCtrls + ' · 손 ' + dbgHands +
-        ' · 점 ' + tips.length, tips.length > 0 ? '#4ecda4' : '#ff7b8f', 44);
+      drawPanel(dbg, '점 ' + tips.length + ' · 방향 ' + calYaw.toFixed(0) + '도 · ' +
+        D.name + ' 버튼 ' + padCount + '개', tips.length > 0 ? '#4ecda4' : '#ff7b8f', 40);
     }
   }
 
@@ -1142,6 +1163,7 @@ function loop(time, frame) {
         var lt = litTime();
         litPad = sequence[playIdx];
         pads[litPad].lit = 1; pads[litPad].press = 1;
+        SCR.quiet = true;                       // 첫 색부터 글자를 감춥니다
         screenFlash(litPad);                    // 스크린에도 같은 색을 띄웁니다
         if (!muted()) padTone(litPad, lt * 0.9);
         playIdx++; timer = lt;
@@ -1172,9 +1194,15 @@ function loop(time, frame) {
 
   // 내려오는 캐릭터 위치와 줄 길이
   if (descGroup.visible) {
-    descKick = Math.max(0, descKick - dt * 3.4);
-    var shown = descY + descKick * 0.17;      // 눈에 보이는 높이 (튕김 포함)
+    descKick = Math.max(0, descKick - dt * 2.6);
+    // 튕김은 위로 솟았다가 가라앉습니다. 천장에 붙어 있어도 반응이 확실히 보입니다
+    var kick = Math.sin(descKick * Math.PI) * CFG.kickHeight;
+    var shown = descY + kick;
     descGroup.position.y = shown;
+    if (animalMesh) {
+      animalMesh.scale.setScalar(0.62 * (1 + descKick * 0.10));
+      animalMesh.rotation.z = Math.sin(descKick * Math.PI * 3) * 0.22 * descKick;
+    }
     var ropeTop = CFG.ropeTop;
     var rl = Math.max(0.1, ropeTop - shown);
     rope.scale.y = rl; rope.position.y = rl / 2 + 0.02;
