@@ -91,8 +91,11 @@ var CFG = {
   descEnd:      0.52,   // 여기까지 내려오면 끝 (눈높이 살짝 위)
   descBegin:    1.24,   // 게임 시작 높이. 천장에 붙여두면 눌러도 안 올라가 보입니다
   ropeTop:      2.55,   // 줄이 매달린 천장 지점
-  speedGrow:    0.180,  // 레벨당 하강 속도 증가율
-  kickHeight:   0.30,   // 맞혔을 때 튕겨 오르는 연출 높이(m)
+  speedGrow:    0.100,  // 레벨당 하강 속도 증가율
+  kickHeight:   0.05,
+  spinRate:     0.26,   // 고양이 방해: 링이 도는 속도 (라디안/초, 약 15도/초)
+  balloonRate:  1.15,   // 곰 방해: 풍선 왕복 속도 (한 왕복 약 5.5초)
+  balloonSwing: 0.60,   // 곰 방해: 풍선이 좌우로 오가는 폭(m)
 
   touchRadius:  0.085,
   wandLength:   0.26,
@@ -117,13 +120,13 @@ var CFG = {
 // step 은 전체 구간(1.00m)의 10~12%라서 맞힐 때마다 눈에 띄게 밀려납니다.
 var DIFFS = [
   { key:'easy',   name:'쉬움',   color:0x3ecf8e,
-    startPads:4, speed:0.026, step:0.10, wrongDrop:0.15, wrongMul:1.10,
+    startPads:4, speed:0.048, step:0.16, wrongDrop:0.08, wrongMul:1.12,
     expandEvery:8, lit:0.80, gap:0.32, inputTimeout:9.0, interfere:false },
   { key:'normal', name:'보통',   color:0xffc93c,
-    startPads:6, speed:0.023, step:0.11, wrongDrop:0.19, wrongMul:1.16,
+    startPads:6, speed:0.044, step:0.16, wrongDrop:0.09, wrongMul:1.16,
     expandEvery:6, lit:0.62, gap:0.24, inputTimeout:8.0, interfere:false },
   { key:'hard',   name:'어려움', color:0xff5d5d,
-    startPads:8, speed:0.017, step:0.12, wrongDrop:0.24, wrongMul:1.22,
+    startPads:8, speed:0.029, step:0.16, wrongDrop:0.10, wrongMul:1.20,
     expandEvery:5, lit:0.48, gap:0.17, inputTimeout:7.0, interfere:true }
 ];
 
@@ -143,8 +146,9 @@ var ANIMALS = [
     power:'fast',  hint:'순서가 빨라져요' },
   { key:'bear',   name:'곰',     fur:0xa9764b, accent:0xe4cba6, ear:'round', tail:'none',
     power:'block', hint:'풍선이 앞을 가려요' },
-  { key:'fox',    name:'여우',   fur:0xe8823c, accent:0xfff0e2, ear:'point', tail:'long',
-    power:'mute',  hint:'소리가 안 나요' },
+  // 여우는 일단 뺐습니다. 되살리려면 아래 두 줄의 주석을 풀면 됩니다.
+  // { key:'fox', name:'여우', fur:0xe8823c, accent:0xfff0e2, ear:'point', tail:'long',
+  //   power:'mute', hint:'소리가 안 나요' },
   { key:'cat',    name:'고양이', fur:0x9a9cab, accent:0xf2f2f8, ear:'point', tail:'long',
     power:'spin',  hint:'버튼이 돌아가요' },
   { key:'owl',    name:'부엉이', fur:0x9a7fc4, accent:0xffe2a8, ear:'tuft',  tail:'none',
@@ -172,6 +176,7 @@ function levelMul() { return Math.pow(CFG.playSpeedUp, level - 1); }
 function litTime() { return Math.max(CFG.litMin, D.lit * levelMul()) * fastMul(); }
 function gapTime() { return Math.max(CFG.gapMin, D.gap * levelMul()) * fastMul(); }
 function muted()   { return !!(animal && D.interfere && animal.power === 'mute'); }
+function interferePower() { return (D.interfere && animal) ? animal.power : null; }
 
 /* ============================================================
    2. 초기화
@@ -550,6 +555,7 @@ function buildDescender() {
 }
 
 function setAnimal(spec) {
+  resetRing();          // 새 캐릭터가 나오면 버튼 배치를 원래대로
   animal = spec;
   if (animalMesh) { descGroup.remove(animalMesh); }
   animalMesh = buildAnimal(spec);
@@ -879,9 +885,7 @@ function toSelect() {
   calibrated = false; settle = CFG.settleTime;
   showPads(0); showDiff(true);
   descGroup.visible = false;
-  padRing.rotation.y = 0; spinAmt = 0;
-  balloon.visible = false;
-  resetLights();
+  clearInterference(); resetRing();
   var anyBest = best.easy || best.normal || best.hard;
   screenMsg('난이도를 골라요', anyBest
     ? '최고 기록   쉬움 ' + best.easy + '   보통 ' + best.normal + '   어려움 ' + best.hard
@@ -938,17 +942,15 @@ function nextRound() {
 function beginShow() {
   state = 'SHOW';
   playIdx = 0; timer = 0.7; litPad = -1;
-  padRing.rotation.y = 0; spinAmt = 0;
-  if (D.interfere && animal.power === 'block') blockT = 0;
   screenMsg('잘 보세요', D.name + '   레벨 ' + level + '   버튼 ' + padCount + '개', '#f2eefc');
 }
 
 function toInput() {
   state = 'INPUT';
-  inputIdx = 0; timer = D.inputTimeout;
-  blockT = -1; balloon.visible = false;
-  resetLights();
+  inputIdx = 0;
+  timer = D.inputTimeout;
   SCR.quiet = false;
+  // 방해는 끄지 않습니다. 입력하는 동안에도 계속 걸립니다
   screenMsg('따라 해요', '0 / ' + sequence.length, '#4ecda4');
 }
 
@@ -956,8 +958,7 @@ function gameOver(caught) {
   state = 'OVER';
   timer = CFG.gameOverHold;
   for (var i = 0; i < 16; i++) pads[i].lit = 0;
-  balloon.visible = false;
-  resetLights();
+  clearInterference();
   buzz(1.0, 220);
   tone(180, 0.5, 'triangle', 0.16);
   setTimeout(function () { tone(140, 0.7, 'triangle', 0.14); }, 140);
@@ -968,11 +969,56 @@ function gameOver(caught) {
     (isBest && score > 0 ? D.name + ' 최고 기록이에요' : '다시 해볼까요'), '#ffd166');
 }
 
+/* ============================================================
+   방해 — 재생 중에도, 입력 중에도 계속 걸립니다
+   ============================================================ */
+function interfering() {
+  return !!(D.interfere && animal && (state === 'SHOW' || state === 'INPUT'));
+}
+
+function applyInterference(dt) {
+  if (!interfering()) return;
+  var p = animal.power;
+
+  if (p === 'spin') {
+    // 멈추지 않고 계속 돕니다. 한 바퀴를 다 돌아도 그대로 이어집니다
+    padRing.rotation.y += dt * CFG.spinRate;
+    spinAmt += dt * CFG.spinRate;
+
+  } else if (p === 'dark') {
+    darkAmt = Math.min(1, darkAmt + dt * 1.6);
+    envLights.hemi.intensity = envLights.baseHemi * (1 - darkAmt * 0.74);
+    envLights.key.intensity  = envLights.baseKey  * (1 - darkAmt * 0.80);
+    envLights.fill.intensity = envLights.baseFill * (1 - darkAmt * 0.62);
+
+  } else if (p === 'block') {
+    // 풍선이 좌우로 부드럽게 왕복합니다 (끝에서 끊기지 않고 되돌아옵니다)
+    if (blockT < 0) blockT = 0;
+    blockT += dt * CFG.balloonRate;
+    balloon.visible = true;
+    balloon.position.set(Math.sin(blockT) * CFG.balloonSwing,
+                         0.30 + Math.cos(blockT * 2) * 0.10,
+                         -0.50);
+  }
+}
+
 function resetLights() {
   darkAmt = 0;
   envLights.hemi.intensity = envLights.baseHemi;
   envLights.key.intensity = envLights.baseKey;
   envLights.fill.intensity = envLights.baseFill;
+}
+
+function clearInterference() {
+  balloon.visible = false;
+  blockT = -1;
+  resetLights();
+  // 링 회전은 여기서 되돌리지 않습니다. 갑자기 제자리로 튀면 더 헷갈립니다
+}
+
+function resetRing() {
+  padRing.rotation.y = 0;
+  spinAmt = 0;
 }
 
 /* ============================================================
@@ -1043,6 +1089,7 @@ function hitPad(i) {
     SCR.sub = inputIdx + ' / ' + sequence.length;   // 다음 paintScreen에서 반영됩니다
     if (inputIdx >= sequence.length) {
       state = 'GOOD'; timer = 1.15;
+      clearInterference();
       chord([659.25, 783.99, 1046.5]);
       screenMsg('맞았어요', '다음 레벨', '#4ecda4');
     }
@@ -1109,6 +1156,8 @@ function loop(time, frame) {
     }
   }
 
+  applyInterference(dt);
+
   var playing = (state === 'SHOW' || state === 'INPUT' || state === 'GOOD' ||
                  state === 'EXPAND' || state === 'INTRO');
 
@@ -1136,23 +1185,6 @@ function loop(time, frame) {
 
   } else if (state === 'SHOW') {
     timer -= dt;
-
-    if (D.interfere && animal.power === 'spin' && spinAmt < 0.78) {
-      var ds = dt * 0.34;
-      padRing.rotation.y += ds; spinAmt += ds;
-    }
-    if (D.interfere && animal.power === 'dark') {
-      darkAmt = Math.min(1, darkAmt + dt * 1.6);
-      envLights.hemi.intensity = envLights.baseHemi * (1 - darkAmt * 0.72);
-      envLights.key.intensity  = envLights.baseKey  * (1 - darkAmt * 0.78);
-      envLights.fill.intensity = envLights.baseFill * (1 - darkAmt * 0.6);
-    }
-    if (blockT >= 0) {
-      blockT += dt * 0.42;
-      balloon.visible = blockT < 1;
-      balloon.position.set(-1.5 + blockT * 3.0, 0.30 + Math.sin(blockT * 6) * 0.08, -0.46);
-      if (blockT >= 1) blockT = 0;
-    }
 
     if (timer <= 0) {
       if (litPad >= 0) {
@@ -1194,10 +1226,10 @@ function loop(time, frame) {
 
   // 내려오는 캐릭터 위치와 줄 길이
   if (descGroup.visible) {
-    descKick = Math.max(0, descKick - dt * 2.6);
-    // 튕김은 위로 솟았다가 가라앉습니다. 천장에 붙어 있어도 반응이 확실히 보입니다
-    var kick = Math.sin(descKick * Math.PI) * CFG.kickHeight;
-    var shown = descY + kick;
+    descKick = Math.max(0, descKick - dt * 3.0);
+    // 올라간 자리에서 살짝 넘어갔다 가라앉기만 합니다.
+    // 예전처럼 0으로 되돌아오는 곡선을 쓰면 올렸다 다시 내린 것처럼 보입니다
+    var shown = descY + descKick * CFG.kickHeight;
     descGroup.position.y = shown;
     if (animalMesh) {
       animalMesh.scale.setScalar(0.62 * (1 + descKick * 0.10));
