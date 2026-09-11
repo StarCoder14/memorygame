@@ -269,7 +269,6 @@ function setupVRButton() {
         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
       }).then(function (session) {
         renderer.xr.setSession(session);
-        rig.visible = false;      // 보정 전까지 숨깁니다
         calibrated = false; settle = CFG.settleTime; calWait = 0; recenterHeld = 0;
         initAudio(); toSelect();
         document.getElementById('diag').style.display = 'none';
@@ -1041,10 +1040,17 @@ function applyInterference(dt) {
 // 메뉴 화면에서는 스테이지가 플레이어를 따라다닙니다.
 // 어디를 보고 있든 메뉴는 항상 눈앞에 있고, 난이도를 고르는 순간 그 자리에 고정됩니다.
 function followPlayer(dt, frame) {
-  if (!renderer.xr.isPresenting || state !== 'SELECT') return;
+  if (!renderer.xr.isPresenting) return;
+  // 아직 한 번도 자리를 못 잡았으면 어느 상태든 잡습니다
+  if (state !== 'SELECT' && calibrated) return;
+
   var rs = renderer.xr.getReferenceSpace();
   var pose = (rs && frame) ? frame.getViewerPose(rs) : null;
-  if (!pose) return;
+  if (!pose) {
+    // 머리 위치를 못 읽으면 기본 위치로라도 세웁니다
+    if (!calibrated) { calWait += dt; if (calWait > 2.0) { placeStage(0, CFG.refEyeHeight, 0, 0); calFallback = true; } }
+    return;
+  }
 
   var pp = pose.transform.position, po = pose.transform.orientation;
   _q.set(po.x, po.y, po.z, po.w);
@@ -1255,7 +1261,7 @@ function loop(time, frame) {
   pollRecenter(dt);
   followPlayer(dt, frame);
 
-  if (!renderer.xr.isPresenting) rig.visible = true;
+  rig.visible = true;   // 어떤 경우에도 숨기지 않습니다
 
   var tips = renderer.xr.isPresenting ? touchPoints() : [];
 
