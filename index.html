@@ -214,6 +214,7 @@ function boot() {
   buildDescender();
   buildScreen();
   buildHud();
+  buildHeadPanel();
   buildBalloon();
   fitPoles();
 
@@ -830,6 +831,34 @@ function drawPanel(p, text, color, size) {
   ctx.fillText(text, w / 2, h / 2);
   p.tex.needsUpdate = true;
 }
+// 머리에 붙어 다니는 패널 — 스테이지가 어디 있든, 없든 항상 눈앞에 보입니다
+var headPanel = null, headErr = '', headTick = 0;
+function buildHeadPanel() {
+  var c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  var tex = new THREE.CanvasTexture(c);
+  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.60, 0.15),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
+  mesh.renderOrder = 999;                    // 무엇에도 가려지지 않게
+  mesh.position.set(0, -0.20, -0.75);
+  mesh.visible = false;                       // VR 안에서만 켭니다
+  camera.add(mesh);
+  scene.add(camera);                          // 카메라를 씬에 넣어야 자식이 그려집니다
+  headPanel = { c: c, x: c.getContext('2d'), tex: tex, mesh: mesh };
+}
+function drawHeadPanel(lines, bad) {
+  if (!headPanel) return;
+  var x = headPanel.x, W = headPanel.c.width, H = headPanel.c.height;
+  x.clearRect(0, 0, W, H);
+  x.fillStyle = bad ? 'rgba(90,10,20,0.88)' : 'rgba(10,10,20,0.78)';
+  x.fillRect(0, 0, W, H);
+  x.fillStyle = bad ? '#ffb3bd' : '#cfe9ff';
+  x.font = "600 40px 'Noto Sans KR', system-ui, sans-serif";
+  x.textBaseline = 'top';
+  for (var i = 0; i < lines.length; i++) x.fillText(String(lines[i]).slice(0, 48), 22, 18 + i * 56);
+  headPanel.tex.needsUpdate = true;
+}
+
 function buildHud() {
   dbg = makePanel(0.70, 0.09, 768);
   dbg.mesh.position.set(0, -0.34, -0.58);
@@ -1039,12 +1068,19 @@ function applyInterference(dt) {
 
 // 메뉴 화면에서는 스테이지가 플레이어를 따라다닙니다.
 // 어디를 보고 있든 메뉴는 항상 눈앞에 있고, 난이도를 고르는 순간 그 자리에 고정됩니다.
+function refSpaceSafe() {
+  try {
+    return (renderer.xr && typeof renderer.xr.getReferenceSpace === 'function')
+      ? renderer.xr.getReferenceSpace() : null;
+  } catch (e) { return null; }
+}
+
 function followPlayer(dt, frame) {
   if (!renderer.xr.isPresenting) return;
   // 아직 한 번도 자리를 못 잡았으면 어느 상태든 잡습니다
   if (state !== 'SELECT' && calibrated) return;
 
-  var rs = renderer.xr.getReferenceSpace();
+  var rs = refSpaceSafe();
   var pose = (rs && frame) ? frame.getViewerPose(rs) : null;
   if (!pose) {
     // 머리 위치를 못 읽으면 기본 위치로라도 세웁니다
@@ -1086,6 +1122,10 @@ function followPlayer(dt, frame) {
 
 // 스테이지를 플레이어 기준으로 세웁니다
 function placeStage(x, eyeY, z, yaw) {
+  if (!isFinite(x) || !isFinite(eyeY) || !isFinite(z) || !isFinite(yaw)) {
+    headErr = '자리 값 이상: ' + [x, eyeY, z, yaw].map(function (v) { return String(v).slice(0, 6); }).join(', ');
+    x = 0; eyeY = CFG.refEyeHeight; z = 0; yaw = 0;
+  }
   var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, eyeY / CFG.refEyeHeight));
   rig.scale.setScalar(sc);
   rig.position.set(x, eyeY - CFG.padDrop * sc + CFG.stageLift, z);
@@ -1222,6 +1262,37 @@ function hitPad(i) {
    11. 루프
    ============================================================ */
 function loop(time, frame) {
+  // 게임 로직에서 에러가 나도 화면은 계속 그립니다.
+  // 그리고 에러 내용을 눈앞 패널에 띄웁니다 (헤드셋에서 콘솔을 못 볼 때를 위해)
+  try {
+    gameStep(time, frame);
+  } catch (err) {
+    headErr = (err && err.message ? err.message : String(err));
+  }
+
+  try {
+    if (headPanel && !renderer.xr.isPresenting) headPanel.mesh.visible = false;
+    if (renderer.xr.isPresenting && headPanel) {
+      headPanel.mesh.visible = CFG.debug || !!headErr;
+      headTick += 1;
+      if (headTick % 15 === 0) {
+        var st = [
+          '상태 ' + state + ' · 자리 ' + (calibrated ? (calFallback ? '기본값' : '잡힘') : '아직'),
+          '스테이지 x' + rig.position.x.toFixed(2) + ' y' + rig.position.y.toFixed(2) +
+            ' z' + rig.position.z.toFixed(2) + ' 배율' + rig.scale.x.toFixed(2),
+          '방향 ' + (rig.rotation.y * 180 / Math.PI).toFixed(0) + '도 · 보임 ' + rig.visible +
+            ' · 참조공간 ' + (refSpaceSafe() ? '있음' : '없음'),
+          headErr ? ('오류: ' + headErr) : '오류 없음'
+        ];
+        drawHeadPanel(st, !!headErr);
+      }
+    }
+  } catch (e2) {}
+
+  renderer.render(scene, camera);
+}
+
+function gameStep(time, frame) {
   var dt = Math.min(clock.getDelta(), 0.05);
   var t = (time || 0) * 0.001;
 
@@ -1234,7 +1305,7 @@ function loop(time, frame) {
     if (!calibrated && state !== 'SELECT') { settle -= dt; if (settle <= 0) wantRecenter = true; }
 
     if (wantRecenter) {
-      var refSpace = renderer.xr.getReferenceSpace();
+      var refSpace = refSpaceSafe();
       var pose = (refSpace && frame) ? frame.getViewerPose(refSpace) : null;
       if (pose) {
         var pp = pose.transform.position, po = pose.transform.orientation;
@@ -1278,7 +1349,7 @@ function loop(time, frame) {
       // 바닥(월드 y=0) 기준 실제 높이를 그대로 보여줍니다
       var eyeH = 0, btnH = 0, chrH = 0;
       if (frame) {
-        var rs = renderer.xr.getReferenceSpace();
+        var rs = refSpaceSafe();
         var vp = rs ? frame.getViewerPose(rs) : null;
         if (vp) eyeH = vp.transform.position.y;
       }
@@ -1405,7 +1476,6 @@ function loop(time, frame) {
     dq.glow.material.opacity = dq.lit * 0.95;
   }
 
-  renderer.render(scene, camera);
 }
 
 /* ============================================================
