@@ -168,6 +168,7 @@ var best = { easy: 0, normal: 0, hard: 0 }, calibrated = false, settle = 0, dbgT
 var padCount = 4, D = DIFFS[1], animal = null, animalMesh = null;
 var descY = 0, descMul = 1, descKick = 0, rope = null, descGroup = null;
 var calYaw = 0, calEye = 0, calFallback = false, calWait = 0, recenterHeld = 0, lastGrow = 1;
+var xrTime = 0, yawFlipped = false;
 var spinAmt = 0, darkAmt = 0, blockT = -1;
 var _v, _p, _q, ray;
 
@@ -270,7 +271,7 @@ function setupVRButton() {
         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
       }).then(function (session) {
         renderer.xr.setSession(session);
-        calibrated = false; settle = CFG.settleTime; calWait = 0; recenterHeld = 0;
+        calibrated = false; settle = CFG.settleTime; calWait = 0; recenterHeld = 0; xrTime = 0;
         initAudio(); toSelect();
         document.getElementById('diag').style.display = 'none';
         btn.style.display = 'none';
@@ -1075,49 +1076,60 @@ function refSpaceSafe() {
   } catch (e) { return null; }
 }
 
-function followPlayer(dt, frame) {
-  if (!renderer.xr.isPresenting) return;
-  // 아직 한 번도 자리를 못 잡았으면 어느 상태든 잡습니다
-  if (state !== 'SELECT' && calibrated) return;
+// 머리 위치는 three.js 카메라에서 읽습니다.
+// 컨트롤러 막대를 그리는 것과 같은 좌표라서 어긋날 수가 없습니다.
+function headInfo() {
+  var pp = camera.position;
+  _p.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  var fx = _p.x, fz = _p.z;
+  return { x: pp.x, y: pp.y, z: pp.z, fx: fx, fz: fz, hlen: Math.sqrt(fx * fx + fz * fz) };
+}
 
-  var rs = refSpaceSafe();
-  var pose = (rs && frame) ? frame.getViewerPose(rs) : null;
-  if (!pose) {
-    // 머리 위치를 못 읽으면 기본 위치로라도 세웁니다
-    if (!calibrated) { calWait += dt; if (calWait > 2.0) { placeStage(0, CFG.refEyeHeight, 0, 0); calFallback = true; } }
-    return;
+// 지금 보고 있는 방향 바로 앞에 스테이지를 세웁니다.
+// 세운 뒤 실제로 스테이지 정면이 시선 쪽을 향하는지 확인하고, 반대면 스스로 뒤집습니다.
+function snapToHead() {
+  var h = headInfo();
+  var eyeY = h.y > 0.6 ? h.y : CFG.refEyeHeight;
+  var yaw = h.hlen > 0.12 ? Math.atan2(-h.fx, -h.fz) : (rig.rotation.y - CFG.yawOffset);
+  placeStage(h.x, eyeY, h.z, yaw);
+  calFallback = !(h.y > 0.6);
+
+  if (h.hlen > 0.12) {
+    rig.updateMatrixWorld(true);
+    _v.set(0, 0, -1).transformDirection(rig.matrixWorld);   // 스테이지 정면의 실제 방향
+    var dot = (_v.x * h.fx + _v.z * h.fz) / h.hlen;
+    if (dot < 0) {
+      CFG.yawOffset += Math.PI;      // 앞으로도 계속 맞게 보정값 자체를 뒤집어 둡니다
+      rig.rotation.y += Math.PI;
+      yawFlipped = true;
+      fitPoles();
+    }
   }
+  calYaw = rig.rotation.y * 180 / Math.PI;
+}
 
-  var pp = pose.transform.position, po = pose.transform.orientation;
-  _q.set(po.x, po.y, po.z, po.w);
-  _p.set(0, 0, -1).applyQuaternion(_q);
-  var hx = _p.x, hz = _p.z;
-  var hlen = Math.sqrt(hx * hx + hz * hz);
-  var eyeY = pp.y > 0.6 ? pp.y : CFG.refEyeHeight;
+// 메뉴에서는 시선을 천천히 따라갑니다. 난이도를 고르면 그 자리에 고정됩니다.
+function followPlayer(dt) {
+  if (!renderer.xr.isPresenting || !calibrated || state !== 'SELECT') return;
+  var h = headInfo();
+  var eyeY = h.y > 0.6 ? h.y : CFG.refEyeHeight;
   var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, eyeY / CFG.refEyeHeight));
-  var targetY = eyeY - CFG.padDrop * sc + CFG.stageLift;
-
-  var snap = !calibrated;                       // 처음 한 번은 즉시
-  var k = snap ? 1 : Math.min(1, dt * CFG.followRate);
+  var k = Math.min(1, dt * CFG.followRate);
 
   rig.scale.setScalar(sc);
-  rig.position.x += (pp.x - rig.position.x) * k;
-  rig.position.z += (pp.z - rig.position.z) * k;
-  rig.position.y += (targetY - rig.position.y) * k;
+  rig.position.x += (h.x - rig.position.x) * k;
+  rig.position.z += (h.z - rig.position.z) * k;
+  rig.position.y += ((eyeY - CFG.padDrop * sc + CFG.stageLift) - rig.position.y) * k;
 
-  if (hlen > 0.12) {
-    var want = Math.atan2(-hx, -hz) + CFG.yawOffset;
+  if (h.hlen > 0.12) {
+    var want = Math.atan2(-h.fx, -h.fz) + CFG.yawOffset;
     var d = want - rig.rotation.y;
     while (d >  Math.PI) d -= 2 * Math.PI;
     while (d < -Math.PI) d += 2 * Math.PI;
-    if (snap || Math.abs(d) > CFG.followDead) rig.rotation.y += d * k;
+    if (Math.abs(d) > CFG.followDead) rig.rotation.y += d * k;
   }
-
   fitPoles();
-  calibrated = true;
-  calEye = eyeY;
   calYaw = rig.rotation.y * 180 / Math.PI;
-  rig.visible = true;
 }
 
 // 스테이지를 플레이어 기준으로 세웁니다
@@ -1280,8 +1292,8 @@ function loop(time, frame) {
           '상태 ' + state + ' · 자리 ' + (calibrated ? (calFallback ? '기본값' : '잡힘') : '아직'),
           '스테이지 x' + rig.position.x.toFixed(2) + ' y' + rig.position.y.toFixed(2) +
             ' z' + rig.position.z.toFixed(2) + ' 배율' + rig.scale.x.toFixed(2),
-          '방향 ' + (rig.rotation.y * 180 / Math.PI).toFixed(0) + '도 · 보임 ' + rig.visible +
-            ' · 참조공간 ' + (refSpaceSafe() ? '있음' : '없음'),
+          '방향 ' + (rig.rotation.y * 180 / Math.PI).toFixed(0) + '도 · 머리 y' + camera.position.y.toFixed(2) +
+            (yawFlipped ? ' · 방향 자동보정됨' : ''),
           headErr ? ('오류: ' + headErr) : '오류 없음'
         ];
         drawHeadPanel(st, !!headErr);
@@ -1296,41 +1308,20 @@ function gameStep(time, frame) {
   var dt = Math.min(clock.getDelta(), 0.05);
   var t = (time || 0) * 0.001;
 
-  // 자리 맞추기 — 자동으로 재지 않습니다.
-  // 고개가 어디를 향하든 상관없이, 버튼을 눌러 원하는 순간에만 맞춥니다.
+  // 자리 맞추기
+  // VR에 들어온 직후 0.6초는 기다립니다. 그 전에는 카메라가 아직 PC 시점 값이라 엉뚱한 곳에 세워집니다.
   if (renderer.xr.isPresenting) {
-    var wantRecenter = recenterHeld > CFG.recenterHold;
-
-    // 메뉴에서는 followPlayer 가 계속 맞춰주므로 여기서는 손대지 않습니다
-    if (!calibrated && state !== 'SELECT') { settle -= dt; if (settle <= 0) wantRecenter = true; }
-
-    if (wantRecenter) {
-      var refSpace = refSpaceSafe();
-      var pose = (refSpace && frame) ? frame.getViewerPose(refSpace) : null;
-      if (pose) {
-        var pp = pose.transform.position, po = pose.transform.orientation;
-        _q.set(po.x, po.y, po.z, po.w);
-        _p.set(0, 0, -1).applyQuaternion(_q);
-        var hx = _p.x, hz = _p.z;
-        var hlen = Math.sqrt(hx * hx + hz * hz);
-        var eyeY = pp.y > 0.6 ? pp.y : CFG.refEyeHeight;
-        // 고개를 숙이고 있어 수평 방향을 못 읽으면 이전 방향을 유지합니다
-        var yaw = hlen > 0.12 ? Math.atan2(-hx, -hz) : (rig.rotation.y - CFG.yawOffset);
-        placeStage(pp.x, eyeY, pp.z, yaw);
-        calFallback = (pp.y <= 0.6);
-        recenterHeld = 0;
-        tone(880, 0.18); tone(1320, 0.18);
-        buzz(0.8, 120);
-      } else if (!calibrated && calWait > 3.0) {
-        placeStage(0, CFG.refEyeHeight, 0, 0);
-        calFallback = true;
-      }
-      calWait += dt;
+    xrTime += dt;
+    var longPress = recenterHeld > CFG.recenterHold;
+    if (xrTime > 0.6 && (!calibrated || longPress)) {
+      snapToHead();
+      if (longPress) { tone(880, 0.18); tone(1320, 0.18); buzz(0.8, 120); }
+      recenterHeld = 0;
     }
   }
 
   pollRecenter(dt);
-  followPlayer(dt, frame);
+  followPlayer(dt);
 
   rig.visible = true;   // 어떤 경우에도 숨기지 않습니다
 
@@ -1347,12 +1338,7 @@ function gameStep(time, frame) {
     if (dbgTick > 0.25) {
       dbgTick = 0;
       // 바닥(월드 y=0) 기준 실제 높이를 그대로 보여줍니다
-      var eyeH = 0, btnH = 0, chrH = 0;
-      if (frame) {
-        var rs = refSpaceSafe();
-        var vp = rs ? frame.getViewerPose(rs) : null;
-        if (vp) eyeH = vp.transform.position.y;
-      }
+      var eyeH = camera.position.y, btnH = 0, chrH = 0;
       pads[0].group.getWorldPosition(_v); btnH = _v.y;
       descGroup.getWorldPosition(_v);     chrH = _v.y;
       drawPanel(dbg, '눈 ' + eyeH.toFixed(2) + ' · 버튼 ' + btnH.toFixed(2) +
