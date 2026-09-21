@@ -832,13 +832,30 @@ function drawPanel(p, text, color, size) {
   ctx.fillText(text, w / 2, h / 2);
   p.tex.needsUpdate = true;
 }
+// 스크린이 지금 내 시선 기준으로 어디 있는지 사람 말로 알려줍니다
+function whereIsScreen() {
+  if (!SCR.mesh) return '스크린 없음';
+  SCR.mesh.getWorldPosition(_v);
+  var h = headInfo();
+  var vx = _v.x - h.x, vy = _v.y - h.y, vz = _v.z - h.z;
+  var dist = Math.sqrt(vx * vx + vy * vy + vz * vz);
+  if (h.hlen < 0.05) return '스크린 거리 ' + dist.toFixed(1) + 'm (고개를 들어주세요)';
+  var fx = h.fx / h.hlen, fz = h.fz / h.hlen;
+  var dot = fx * vx + fz * vz, cross = fx * vz - fz * vx;
+  var yaw = Math.atan2(cross, dot) * 180 / Math.PI;           // + 오른쪽, - 왼쪽
+  var pitch = Math.atan2(vy, Math.sqrt(vx * vx + vz * vz)) * 180 / Math.PI;
+  var side = Math.abs(yaw) < 15 ? '정면' : (yaw > 0 ? '오른쪽 ' : '왼쪽 ') + Math.abs(yaw).toFixed(0) + '도';
+  var up = Math.abs(pitch) < 10 ? '' : (pitch > 0 ? ' · 위 ' : ' · 아래 ') + Math.abs(pitch).toFixed(0) + '도';
+  return '스크린: ' + side + up + ' · ' + dist.toFixed(1) + 'm';
+}
+
 // 머리에 붙어 다니는 패널 — 스테이지가 어디 있든, 없든 항상 눈앞에 보입니다
 var headPanel = null, headErr = '', headTick = 0;
 function buildHeadPanel() {
   var c = document.createElement('canvas');
-  c.width = 1024; c.height = 256;
+  c.width = 1024; c.height = 320;
   var tex = new THREE.CanvasTexture(c);
-  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.60, 0.15),
+  var mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.60, 0.1875),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
   mesh.renderOrder = 999;                    // 무엇에도 가려지지 않게
   mesh.position.set(0, -0.20, -0.75);
@@ -1294,6 +1311,7 @@ function loop(time, frame) {
             ' z' + rig.position.z.toFixed(2) + ' 배율' + rig.scale.x.toFixed(2),
           '방향 ' + (rig.rotation.y * 180 / Math.PI).toFixed(0) + '도 · 머리 y' + camera.position.y.toFixed(2) +
             (yawFlipped ? ' · 방향 자동보정됨' : ''),
+          whereIsScreen(),
           headErr ? ('오류: ' + headErr) : '오류 없음'
         ];
         drawHeadPanel(st, !!headErr);
