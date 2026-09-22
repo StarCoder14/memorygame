@@ -100,6 +100,7 @@ var CFG = {
   touchRadius:  0.085,
   wandLength:   0.26,
   padDrop:      0.42,
+  stageLift:    0.00,   // 스테이지 전체를 통째로 올립니다. 없으면 자리 계산이 NaN 이 됩니다
   refEyeHeight: 1.55,
   minScale:     0.70,
   maxScale:     1.12,
@@ -181,7 +182,6 @@ function fastMul() { return (animal && D.interfere && animal.power === 'fast') ?
 function levelMul() { return Math.pow(CFG.playSpeedUp, level - 1); }
 function litTime() { return Math.max(CFG.litMin, D.lit * levelMul()) * fastMul(); }
 function gapTime() { return Math.max(CFG.gapMin, D.gap * levelMul()) * fastMul(); }
-function muted()   { return !!(animal && D.interfere && animal.power === 'mute'); }
 function interferePower() { return (D.interfere && animal) ? animal.power : null; }
 
 /* ============================================================
@@ -943,7 +943,7 @@ function toSelect() {
   var anyBest = best.easy || best.normal || best.hard;
   screenMsg('난이도를 골라요', anyBest
     ? '최고 기록   쉬움 ' + best.easy + '   보통 ' + best.normal + '   어려움 ' + best.hard
-    : '고개를 돌리면 따라와요. 난이도를 고르면 그 자리에 고정돼요', '#ffd166');
+    : '앞의 버튼을 손이나 컨트롤러로 눌러 고르세요', '#ffd166');
 }
 
 function startGame(diff) {
@@ -1140,7 +1140,7 @@ function followPlayer(dt) {
   rig.scale.setScalar(sc);
   rig.position.x += (h.x - rig.position.x) * k;
   rig.position.z += (h.z - rig.position.z) * k;
-  rig.position.y += ((eyeY - CFG.padDrop * sc + CFG.stageLift) - rig.position.y) * k;
+  rig.position.y += ((eyeY - CFG.padDrop * sc + (CFG.stageLift || 0)) - rig.position.y) * k;
 
   if (h.hlen > 0.12) {
     var want = Math.atan2(-h.fx, -h.fz) + CFG.yawOffset;
@@ -1160,9 +1160,22 @@ function placeStage(x, eyeY, z, yaw) {
     x = 0; eyeY = CFG.refEyeHeight; z = 0; yaw = 0;
   }
   var sc = Math.max(CFG.minScale, Math.min(CFG.maxScale, eyeY / CFG.refEyeHeight));
+  var py = eyeY - CFG.padDrop * sc + (CFG.stageLift || 0);
+  var ry = yaw + (CFG.yawOffset || 0);
+
+  // 입력값뿐 아니라 계산 결과도 검사합니다.
+  // 설정값 하나가 undefined 이기만 해도 NaN 이 되고, rig 의 행렬이 NaN 이 되면
+  // 그 아래 전부(스크린·버튼·캐릭터)가 화면에서 통째로 사라집니다.
+  if (!isFinite(sc) || !isFinite(py) || !isFinite(ry)) {
+    headErr = '자리 계산 이상: 배율=' + sc + ' y=' + py + ' 방향=' + ry;
+    sc = 1; py = CFG.refEyeHeight - CFG.padDrop; ry = 0;
+    if (!isFinite(x)) x = 0;
+    if (!isFinite(z)) z = 0;
+  }
+
   rig.scale.setScalar(sc);
-  rig.position.set(x, eyeY - CFG.padDrop * sc + CFG.stageLift, z);
-  rig.rotation.y = yaw + CFG.yawOffset;
+  rig.position.set(x, py, z);
+  rig.rotation.y = ry;
   fitPoles();
   calibrated = true;
   calEye = eyeY;
@@ -1222,19 +1235,22 @@ function touchPoints() {
   }
   return out;
 }
-// 컨트롤러 아무 버튼이나 길게 누르면 자리 맞추기
+// A·X·B·Y 를 길게 누르면 자리 맞추기.
+// 예전처럼 모든 버튼을 보면 트리거를 살짝 쥐고만 있어도 1.2초마다 자리가 다시 잡힙니다.
+// xr-standard 배치에서 4번이 A/X, 5번이 B/Y 입니다 (0 트리거, 1 그립, 3 썸스틱 누름).
+var RECENTER_BUTTONS = [4, 5];
 function pollRecenter(dt) {
   if (!renderer.xr.isPresenting) return;
   var session = renderer.xr.getSession();
   var srcs = (session && session.inputSources) ? session.inputSources : [];
   var pressed = false;
-  for (var i = 0; i < srcs.length; i++) {
+  for (var i = 0; i < srcs.length && !pressed; i++) {
     var gp = srcs[i].gamepad;
     if (!gp || !gp.buttons) continue;
-    for (var b = 0; b < gp.buttons.length; b++) {
-      if (gp.buttons[b] && gp.buttons[b].pressed) { pressed = true; break; }
+    for (var b = 0; b < RECENTER_BUTTONS.length; b++) {
+      var btn = gp.buttons[RECENTER_BUTTONS[b]];
+      if (btn && btn.pressed) { pressed = true; break; }
     }
-    if (pressed) break;
   }
   recenterHeld = pressed ? recenterHeld + dt : 0;
 }
@@ -1412,7 +1428,7 @@ function gameStep(time, frame) {
         pads[litPad].lit = 1; pads[litPad].press = 1;
         SCR.quiet = true;                       // 첫 색부터 글자를 감춥니다
         screenFlash(litPad);                    // 스크린에도 같은 색을 띄웁니다
-        if (!muted()) padTone(litPad, lt * 0.9);
+        padTone(litPad, lt * 0.9);
         playIdx++; timer = lt;
       }
     }
